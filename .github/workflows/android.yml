@@ -21,9 +21,9 @@ env:
   ASSET_DIR: app/build/outputs/apk/release-assets
   ARTIFACT_PASSWORD: Sesame-AG
   RELEASE_TAG_RAW: ${{ github.ref_name }}
-  TARGET_SOURCE_BRANCH: dev
+  TARGET_SOURCE_BRANCH: main  # <-- 已变更为 main
   TARGET_MODULE_REPO: Xposed-Modules-Repo/io.github.aoguai.sesameag
-  PUBLISH_TO_XPOSED_REPO: "false"
+  PUBLISH_TO_XPOSED_REPO: "true"  # <-- 正式主分支通常为 true
 
 concurrency:
   group: release-${{ github.ref_name }}
@@ -82,20 +82,23 @@ jobs:
           configured_version_name=""
           version_name=""
 
-          if [[ "${RELEASE_TAG_RAW}" =~ ${release_tag_regex} ]]; then
+          if [[ "${RELEASE_TAG_RAW}" =~ ${release_tag_regex} ]];
+          then
             tag_valid="true"
             tag_version_code="${BASH_REMATCH[1]}"
             version_name="${BASH_REMATCH[2]}"
           fi
 
           configured_version_name="$(sed -n 's/^appVersion=//p' gradle.properties | head -n1 | tr -d '\r')"
-          if [[ -z "${configured_version_name}" ]]; then
+          if [[ -z "${configured_version_name}" ]];
+          then
             echo "Failed to resolve appVersion from gradle.properties" >&2
             exit 1
           fi
 
           version_code="$(git rev-list --count HEAD | tr -d '\n')"
-          if [[ -z "${version_code}" ]]; then
+          if [[ -z "${version_code}" ]];
+          then
             echo "Failed to resolve versionCode from git history" >&2
             exit 1
           fi
@@ -130,7 +133,9 @@ jobs:
           git fetch origin "refs/heads/${TARGET_SOURCE_BRANCH}:refs/remotes/origin/${TARGET_SOURCE_BRANCH}" --force
 
           missing=()
-          if [[ "${PUBLISH_TO_XPOSED_REPO}" == "true" ]]; then
+          # 仅在非手动触发且需要发布时，强校验 Secrets
+          if [[ "${PUBLISH_TO_XPOSED_REPO}" == "true" && "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]];
+          then
             [[ -n "${ANDROID_SIGNING_KEY}" ]] || missing+=("ANDROID_SIGNING_KEY")
             [[ -n "${ANDROID_KEY_ALIAS}" ]] || missing+=("ANDROID_KEY_ALIAS")
             [[ -n "${ANDROID_KEYSTORE_PASSWORD}" ]] || missing+=("ANDROID_KEYSTORE_PASSWORD")
@@ -141,17 +146,27 @@ jobs:
           ready="false"
           reason=""
 
-          if [[ ${#missing[@]} -gt 0 ]]; then
+          if [[ ${#missing[@]} -gt 0 ]];
+          then
             reason="缺少必要 Secrets: ${missing[*]}"
-          elif [[ "${TAG_VALID}" != "true" ]]; then
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]];
+          then
+            # 手动触发时，直接绿灯通过，声明仅作编译
+            ready="true"
+            reason="手动触发预检通过（仅本地编译打包，跳过 Xposed 发布流程）"
+          elif [[ "${TAG_VALID}" != "true" ]];
+          then
             reason="标签 ${RELEASE_TAG_RAW} 不符合 Xposed 要求的 VersionCode-VersionName 格式"
-          elif [[ "${VERSION_NAME}" != "${CONFIGURED_VERSION_NAME}" ]]; then
+          elif [[ "${VERSION_NAME}" != "${CONFIGURED_VERSION_NAME}" ]];
+          then
             reason="标签中的 versionName (${VERSION_NAME}) 与 gradle.properties 中配置的 appVersion (${CONFIGURED_VERSION_NAME}) 不一致"
-          elif [[ "${TAG_VERSION_CODE}" != "${VERSION_CODE}" ]]; then
+          elif [[ "${TAG_VERSION_CODE}" != "${VERSION_CODE}" ]];
+          then
             reason="标签中的 versionCode (${TAG_VERSION_CODE}) 与当前提交计算得到的 versionCode (${VERSION_CODE}) 不一致"
           elif ! git merge-base --is-ancestor "${GITHUB_SHA}" "origin/${TARGET_SOURCE_BRANCH}"; then
             reason="标签 ${RELEASE_TAG_RAW} 指向的提交不在 ${TARGET_SOURCE_BRANCH} 分支上"
-          elif [[ "${PUBLISH_TO_XPOSED_REPO}" != "true" ]]; then
+          elif [[ "${PUBLISH_TO_XPOSED_REPO}" != "true" ]];
+          then
             ready="true"
             reason="预检通过"
           else
@@ -160,7 +175,8 @@ jobs:
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer ${TARGET_REPO_PAT}" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
-              "${api_url}")"; then
+              "${api_url}")";
+            then
               case "${http_code}" in
                 200)
                   ready="true"
@@ -193,7 +209,7 @@ jobs:
           {
             echo "## Release Preflight"
             echo
-            echo "- 触发事件: \`push(tag)\`"
+            echo "- 触发事件: \`${GITHUB_EVENT_NAME}\`"
             echo "- 源仓库标签: \`${RELEASE_TAG_RAW}\`"
             echo "- 校验分支: \`${TARGET_SOURCE_BRANCH}\`"
             echo "- 标签格式有效: \`${TAG_VALID}\`"
@@ -256,8 +272,6 @@ jobs:
             "platform-tools" \
             "platforms;android-${ANDROID_API_LEVEL}" \
             "build-tools;${ANDROID_BUILD_TOOLS}"
-          # `yes` will receive SIGPIPE after sdkmanager finishes reading input.
-          # Run this pipeline without pipefail so the step reflects sdkmanager's exit code.
           set +o pipefail
           yes | sdkmanager --licenses >/dev/null
           set -o pipefail
@@ -296,13 +310,19 @@ jobs:
           rm -rf "${STAGING_DIR}" "${ASSET_DIR}"
           mkdir -p "${STAGING_DIR}"
           mapfile -t apks < <(find "${RELEASE_DIR}" -maxdepth 1 -type f -name "*.apk" | sort)
-          if [[ ${#apks[@]} -eq 0 ]]; then
+          if [[ ${#apks[@]} -eq 0 ]];
+          then
             echo "No release APKs found in ${RELEASE_DIR}" >&2
             exit 1
           fi
-          for apk in "${apks[@]}"; do
+          for apk in "${apks[@]}";
+          do
             cp "${apk}" "${STAGING_DIR}/"
           done
+
+          if [ -f "${RELEASE_DIR}/app-release.apk" ]; then
+            cp "${RELEASE_DIR}/app-release.apk" "${STAGING_DIR}/" 2>/dev/null || true
+          fi
 
       - name: Package APK Artifact
         id: package_artifact
@@ -326,7 +346,7 @@ jobs:
           if-no-files-found: error
 
       - name: Sign APKs
-        if: env.PUBLISH_TO_XPOSED_REPO == 'true'
+        if: env.PUBLISH_TO_XPOSED_REPO == 'true' && github.event_name != 'workflow_dispatch'
         id: sign_apks
         uses: ilharp/sign-android-release@v2
         with:
@@ -338,7 +358,7 @@ jobs:
           buildToolsVersion: ${{ env.ANDROID_BUILD_TOOLS }}
 
       - name: Prepare Release Assets
-        if: env.PUBLISH_TO_XPOSED_REPO == 'true'
+        if: env.PUBLISH_TO_XPOSED_REPO == 'true' && github.event_name != 'workflow_dispatch'
         id: prepare_assets
         shell: bash
         run: |
@@ -346,7 +366,8 @@ jobs:
           mkdir -p "${ASSET_DIR}"
           IFS=':' read -r -a files <<< "${{ steps.sign_apks.outputs.signedFiles }}"
           copied=0
-          for file in "${files[@]}"; do
+          for file in "${files[@]}";
+          do
             [[ -n "${file}" ]] || continue
             cp "${file}" "${ASSET_DIR}/"
             (
@@ -355,14 +376,15 @@ jobs:
             )
             copied=$((copied + 1))
           done
-          if [[ ${copied} -eq 0 ]]; then
+          if [[ ${copied} -eq 0 ]];
+          then
             echo "No signed APKs were produced" >&2
             exit 1
           fi
           echo "asset_dir=${ASSET_DIR}" >> "$GITHUB_OUTPUT"
 
       - name: Generate Release Notes
-        if: env.PUBLISH_TO_XPOSED_REPO == 'true'
+        if: env.PUBLISH_TO_XPOSED_REPO == 'true' && github.event_name != 'workflow_dispatch'
         id: release_notes
         shell: bash
         env:
@@ -396,15 +418,18 @@ jobs:
             [other]="其他更新"
           )
 
-          for category in "${categories[@]}"; do
+          for category in "${categories[@]}";
+          do
             : > "${tmp_dir}/${category}.md"
           done
 
-          if [[ "${tag_object_type}" == "tag" ]]; then
+          if [[ "${tag_object_type}" == "tag" ]];
+          then
             tag_notes="$(git for-each-ref "${GITHUB_REF}" --format='%(contents)')"
           fi
 
-          if [[ -n "${prev_tag}" ]]; then
+          if [[ -n "${prev_tag}" ]];
+          then
             compare_url="https://github.com/${REPOSITORY}/compare/${prev_tag}...${RELEASE_TAG_RAW}"
             commit_range_display="${prev_tag}...${RELEASE_TAG_RAW}"
             range_args=("${prev_tag}..${GITHUB_SHA}")
@@ -419,7 +444,8 @@ jobs:
             [[ -n "${commit_sha}" ]] || continue
 
             author_key="${author_name}|${author_email,,}"
-            if [[ -z "${seen_release_author[$author_key]+x}" ]]; then
+            if [[ -z "${seen_release_author[$author_key]+x}" ]];
+            then
               seen_release_author[$author_key]=1
               printf '%s\t%s\t%s\n' \
                 "${commit_sha}" \
@@ -428,12 +454,14 @@ jobs:
                 >> "${contributors_path}"
             fi
 
-            if [[ "${commit_subject}" =~ ${excluded_type_regex} ]]; then
+            if [[ "${commit_subject}" =~ ${excluded_type_regex} ]];
+            then
               continue
             fi
 
             category="other"
-            if [[ "${commit_subject}" =~ ${commit_type_regex} ]]; then
+            if [[ "${commit_subject}" =~ ${commit_type_regex} ]];
+            then
               commit_type="${BASH_REMATCH[1],,}"
               case "${commit_type}" in
                 feat|fix|perf|refactor|revert)
@@ -459,7 +487,8 @@ jobs:
           contributor_names=()
           declare -A seen_contributor=()
 
-          while IFS=$'\t' read -r contributor_sha contributor_name contributor_email; do
+          while IFS=$'\t' read -r contributor_sha contributor_name contributor_email;
+          do
             [[ -n "${contributor_sha}" ]] || continue
 
             api_json="$(curl -fsSL \
@@ -471,25 +500,29 @@ jobs:
             contributor_login=""
             contributor_avatar_url=""
 
-            if [[ -n "${api_json}" ]]; then
+            if [[ -n "${api_json}" ]];
+            then
               contributor_login="$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(((data.get("author") or {}).get("login") or "").strip())' <<< "${api_json}")"
               contributor_avatar_url="$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(((data.get("author") or {}).get("avatar_url") or "").strip())' <<< "${api_json}")"
             fi
 
             dedupe_key="${contributor_login:-${contributor_name}|${contributor_email}}"
-            if [[ -n "${seen_contributor[$dedupe_key]+x}" ]]; then
+            if [[ -n "${seen_contributor[$dedupe_key]+x}" ]];
+            then
               continue
             fi
             seen_contributor[$dedupe_key]=1
 
             contributor_label="${contributor_name}"
-            if [[ -n "${contributor_login}" ]]; then
+            if [[ -n "${contributor_login}" ]];
+            then
               contributor_label="@${contributor_login}"
             fi
 
             contributor_names+=("${contributor_label}")
 
-            if [[ -n "${contributor_login}" && -n "${contributor_avatar_url}" ]]; then
+            if [[ -n "${contributor_login}" && -n "${contributor_avatar_url}" ]];
+            then
               contributor_html+="$(
                 printf '<a href="https://github.com/%s" title="%s"><img src="%s" width="40" height="40" alt="%s" style="border-radius:50%%;margin:0 6px 6px 0;" /></a>' \
                   "${contributor_login}" \
@@ -508,18 +541,22 @@ jobs:
             echo "变更范围：\`${commit_range_display}\`"
             echo
 
-            if [[ -n "${tag_notes//[[:space:]]/}" ]]; then
+            if [[ -n "${tag_notes//[[:space:]]/}" ]];
+            then
               echo "## 发布备注"
               echo
               echo "${tag_notes}"
               echo
             fi
 
-            if [[ ${relevant_commit_count} -gt 0 ]]; then
+            if [[ ${relevant_commit_count} -gt 0 ]];
+            then
               echo "## 变更说明"
               echo
-              for category in "${categories[@]}"; do
-                if [[ -s "${tmp_dir}/${category}.md" ]]; then
+              for category in "${categories[@]}";
+              do
+                if [[ -s "${tmp_dir}/${category}.md" ]];
+                then
                   echo "### ${category_titles[$category]}"
                   echo
                   cat "${tmp_dir}/${category}.md"
@@ -528,18 +565,22 @@ jobs:
               done
             fi
 
-            if [[ ${#contributor_names[@]} -gt 0 ]]; then
+            if [[ ${#contributor_names[@]} -gt 0 ]];
+            then
               echo "## 本轮贡献者"
               echo
 
-              if [[ -n "${contributor_html}" ]]; then
+              if [[ -n "${contributor_html}" ]];
+              then
                 echo "<p>${contributor_html}</p>"
                 echo
               fi
 
               joined_contributors=""
-              for contributor_name in "${contributor_names[@]}"; do
-                if [[ -n "${joined_contributors}" ]]; then
+              for contributor_name in "${contributor_names[@]}";
+              do
+                if [[ -n "${joined_contributors}" ]];
+                then
                   joined_contributors+="、"
                 fi
                 joined_contributors+="${contributor_name}"
@@ -550,7 +591,8 @@ jobs:
 
             echo "## Full Changelog"
             echo
-            if [[ -n "${compare_url}" ]]; then
+            if [[ -n "${compare_url}" ]];
+            then
               echo "- 对比视图：${compare_url}"
             fi
             echo "- 提交历史：${commit_history_url}"
@@ -568,7 +610,7 @@ jobs:
           echo "body_path=${body_path}" >> "$GITHUB_OUTPUT"
 
       - name: Sync Release to Target Repository
-        if: env.PUBLISH_TO_XPOSED_REPO == 'true'
+        if: env.PUBLISH_TO_XPOSED_REPO == 'true' && github.event_name != 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
           repository: ${{ env.TARGET_MODULE_REPO }}
