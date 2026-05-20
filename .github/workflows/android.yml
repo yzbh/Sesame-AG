@@ -19,11 +19,10 @@ env:
   RELEASE_DIR: app/build/outputs/apk/release
   STAGING_DIR: app/build/outputs/apk/all
   ASSET_DIR: app/build/outputs/apk/release-assets
-  ARTIFACT_PASSWORD: Sesame-AG
   RELEASE_TAG_RAW: ${{ github.ref_name }}
-  TARGET_SOURCE_BRANCH: dev  # <-- dev 分支这里必须是 dev，修复 128 错误
+  TARGET_SOURCE_BRANCH: dev
   TARGET_MODULE_REPO: Xposed-Modules-Repo/io.github.aoguai.sesameag
-  PUBLISH_TO_XPOSED_REPO: "false"  # dev 分支通常不需要自动发布到正式市场
+  PUBLISH_TO_XPOSED_REPO: "false"
 
 concurrency:
   group: release-${{ github.ref_name }}
@@ -130,7 +129,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 手动触发拦截器：如果是网页手动点击运行，直接绿灯放行，跳过后续复杂校验
+          # 手动触发拦截器：如果是网页手动点击运行，直接绿灯放行
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             echo "ready=true" >> "$GITHUB_OUTPUT"
             {
@@ -223,7 +222,7 @@ jobs:
             echo "## Release Preflight"
             echo
             echo "- 触发事件: \`${GITHUB_EVENT_NAME}\`"
-            echo "-源仓库标签: \`${RELEASE_TAG_RAW}\`"
+            echo "- 源仓库标签: \`${RELEASE_TAG_RAW}\`"
             echo "- 校验分支: \`${TARGET_SOURCE_BRANCH}\`"
             echo "- 标签格式有效: \`${TAG_VALID}\`"
             echo "- 标签中的版本号: \`${TAG_VERSION_CODE}\`"
@@ -316,46 +315,38 @@ jobs:
           set -euo pipefail
           ./gradlew --no-daemon --stacktrace assembleRelease
 
-      - name: Stage Unsigned APKs
+      - name: Stage APKs Separately
+        id: stage_apks
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf "${STAGING_DIR}" "${ASSET_DIR}"
+          rm -rf "${STAGING_DIR}"
           mkdir -p "${STAGING_DIR}"
-          mapfile -t apks < <(find "${RELEASE_DIR}" -maxdepth 1 -type f -name "*.apk" | sort)
+          
+          # 寻找生成的各分流/独立架构 APK
+          mapfile -t apks < <(find "${RELEASE_DIR}" -maxdepth 2 -type f -name "*.apk" | sort)
           if [[ ${#apks[@]} -eq 0 ]];
           then
             echo "No release APKs found in ${RELEASE_DIR}" >&2
             exit 1
           fi
+          
+          echo "Found APKs:"
           for apk in "${apks[@]}";
           do
-            cp "${apk}" "${STAGING_DIR}/"
+            name=$(basename "${apk}")
+            echo " - ${name}"
+            # 拷贝到临时目录统一改名或直接存放，这里直接存放
+            cp "${apk}" "${STAGING_DIR}/${name}"
           done
 
-          if [ -f "${RELEASE_DIR}/app-release.apk" ]; then
-            cp "${RELEASE_DIR}/app-release.apk" "${STAGING_DIR}/" 2>/dev/null || true
-          fi
-
-      - name: Package APK Artifact
-        id: package_artifact
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "${ASSET_DIR}"
-          artifact_path="${GITHUB_WORKSPACE}/${ASSET_DIR}/Sesame-AG-${RELEASE_TAG_RAW}.zip"
-          (
-            cd "${STAGING_DIR}"
-            zip -r -P "${ARTIFACT_PASSWORD}" "${artifact_path}" .
-          )
-          echo "artifact_path=${artifact_path}" >> "$GITHUB_OUTPUT"
-
-      - name: Upload APK Artifact
+      # 直接以多文件形式上传，在网页上会显示为独立的多个 APK 供点击下载
+      - name: Upload Separate APK Artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: Sesame-AG-${{ github.ref_name }}
+          name: Sesame-AG-${{ github.ref_name }}-APKs
           archive: false
-          path: ${{ steps.package_artifact.outputs.artifact_path }}
+          path: ${{ env.STAGING_DIR }}/*.apk
           if-no-files-found: error
 
       - name: Sign APKs
@@ -442,6 +433,7 @@ jobs:
           fi
 
           if [[ -n "${prev_tag}" ]];
+          -- refs/tags check
           then
             compare_url="https://github.com/${REPOSITORY}/compare/${prev_tag}...${RELEASE_TAG_RAW}"
             commit_range_display="${prev_tag}...${RELEASE_TAG_RAW}"
