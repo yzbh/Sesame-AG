@@ -21,9 +21,9 @@ env:
   ASSET_DIR: app/build/outputs/apk/release-assets
   ARTIFACT_PASSWORD: Sesame-AG
   RELEASE_TAG_RAW: ${{ github.ref_name }}
-  TARGET_SOURCE_BRANCH: main  # <-- 已变更为 main
+  TARGET_SOURCE_BRANCH: main  # <-- 已变更为 main，修复 128 错误
   TARGET_MODULE_REPO: Xposed-Modules-Repo/io.github.aoguai.sesameag
-  PUBLISH_TO_XPOSED_REPO: "true"  # <-- 正式主分支通常为 true
+  PUBLISH_TO_XPOSED_REPO: "true"  # main 分支正式发布通常为 true
 
 concurrency:
   group: release-${{ github.ref_name }}
@@ -130,11 +130,29 @@ jobs:
         run: |
           set -euo pipefail
 
+          # 手动触发拦截器：如果是网页手动点击运行，直接绿灯放行，跳过后续复杂校验
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "reason<<EOF"
+              echo "网页手动触发：已跳过标签和分支检查，仅执行本地编译打包（不发布到外部仓库）。"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            
+            {
+              echo "## Release Preflight"
+              echo
+              echo "- 触发事件: \`workflow_dispatch (网页手动触发)\`"
+              echo "- 检查结果: 拦截器放行成功，直接进入编译流程。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # 正常推送 tag 自动化发布时才会执行的代码：
           git fetch origin "refs/heads/${TARGET_SOURCE_BRANCH}:refs/remotes/origin/${TARGET_SOURCE_BRANCH}" --force
 
           missing=()
-          # 仅在非手动触发且需要发布时，强校验 Secrets
-          if [[ "${PUBLISH_TO_XPOSED_REPO}" == "true" && "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]];
+          if [[ "${PUBLISH_TO_XPOSED_REPO}" == "true" ]];
           then
             [[ -n "${ANDROID_SIGNING_KEY}" ]] || missing+=("ANDROID_SIGNING_KEY")
             [[ -n "${ANDROID_KEY_ALIAS}" ]] || missing+=("ANDROID_KEY_ALIAS")
@@ -149,11 +167,6 @@ jobs:
           if [[ ${#missing[@]} -gt 0 ]];
           then
             reason="缺少必要 Secrets: ${missing[*]}"
-          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]];
-          then
-            # 手动触发时，直接绿灯通过，声明仅作编译
-            ready="true"
-            reason="手动触发预检通过（仅本地编译打包，跳过 Xposed 发布流程）"
           elif [[ "${TAG_VALID}" != "true" ]];
           then
             reason="标签 ${RELEASE_TAG_RAW} 不符合 Xposed 要求的 VersionCode-VersionName 格式"
@@ -588,59 +601,3 @@ jobs:
               echo "感谢以下参与本轮更新提交的开发者：${joined_contributors}"
               echo
             fi
-
-            echo "## Full Changelog"
-            echo
-            if [[ -n "${compare_url}" ]];
-            then
-              echo "- 对比视图：${compare_url}"
-            fi
-            echo "- 提交历史：${commit_history_url}"
-            echo
-
-            echo "> ## 下载说明"
-            echo "<b>- arm64-v8a:</b> 适用于64位 ARM 设备 (主流新手机)"
-            echo "<b>- armeabi-v7a:</b> 适用于32位 ARM 设备 (旧款手机)"
-            echo "<b>- x86 / x86_64:</b> 主要用于 PC 上的安卓模拟器"
-            echo "<b>- universal:</b> 通用版 (不确定时使用，体积较大)"
-            echo ">"
-            echo "> **如果不确定，请下载 \`universal\` 版本。**"
-          } > "${body_path}"
-
-          echo "body_path=${body_path}" >> "$GITHUB_OUTPUT"
-
-      - name: Sync Release to Target Repository
-        if: env.PUBLISH_TO_XPOSED_REPO == 'true' && github.event_name != 'workflow_dispatch'
-        uses: softprops/action-gh-release@v2
-        with:
-          repository: ${{ env.TARGET_MODULE_REPO }}
-          name: ${{ needs.preflight.outputs.version_name }}
-          files: |
-            ${{ steps.prepare_assets.outputs.asset_dir }}/*
-          token: ${{ secrets.TARGET_REPO_PAT }}
-          tag_name: ${{ needs.preflight.outputs.xposed_tag }}
-          draft: false
-          prerelease: false
-          make_latest: true
-          fail_on_unmatched_files: true
-          generate_release_notes: false
-          body_path: ${{ steps.release_notes.outputs.body_path }}
-
-  skip:
-    needs: preflight
-    if: needs.preflight.outputs.ready != 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
-    steps:
-      - name: Report Skip Reason
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Release workflow skipped: ${{ needs.preflight.outputs.reason }}"
-          {
-            echo "## Release Skipped"
-            echo
-            echo "- 原因: ${{ needs.preflight.outputs.reason }}"
-          } >> "$GITHUB_STEP_SUMMARY"
