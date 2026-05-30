@@ -14,12 +14,19 @@ import io.github.aoguai.sesameag.model.modelFieldExt.FriendSelectionModelField
 import io.github.aoguai.sesameag.task.ModelTask
 import io.github.aoguai.sesameag.task.TaskCommon
 import io.github.aoguai.sesameag.task.TaskStatus
+import io.github.aoguai.sesameag.task.common.TaskFlowAction
+import io.github.aoguai.sesameag.task.common.TaskFlowActionResult
+import io.github.aoguai.sesameag.task.common.TaskFlowAdapter
+import io.github.aoguai.sesameag.task.common.TaskFlowDecision
+import io.github.aoguai.sesameag.task.common.TaskFlowEngine
+import io.github.aoguai.sesameag.task.common.TaskFlowItem
+import io.github.aoguai.sesameag.task.common.TaskFlowPhase
+import io.github.aoguai.sesameag.task.common.TaskRpcFailureType
 import io.github.aoguai.sesameag.util.FriendGuard
 import io.github.aoguai.sesameag.util.GlobalThreadPools
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.maps.UserMap
 import io.github.aoguai.sesameag.util.ResChecker
-import io.github.aoguai.sesameag.util.TaskBlacklist
 import io.github.aoguai.sesameag.util.TimeUtil
 import io.github.aoguai.sesameag.util.friend.FriendCapabilityRecorder
 
@@ -245,106 +252,7 @@ class AntDodo : ModelTask() {
 
     private fun receiveTaskAward() {
         try {
-            val businessDrivenTasks = LinkedHashSet(listOf("HELP_FRIEND_COLLECT"))
-            while (!Thread.currentThread().isInterrupted) {
-                var doubleCheck = false
-                val response = AntDodoRpcCall.taskList()
-                if (response.isNullOrEmpty()) {
-                    Log.runtime(TAG, "taskList返回空")
-                    break
-                }
-                val jsonResponse = JSONObject(response)
-                if (!ResChecker.checkRes(TAG, jsonResponse)) {
-                    Log.dodo("查询任务列表失败：${jsonResponse.optString("resultDesc")}")
-                    break
-                }
-                val taskGroupInfoList = jsonResponse.optJSONObject("data")?.optJSONArray("taskGroupInfoList") ?: break
-                for (i in 0 until taskGroupInfoList.length()) {
-                    val antDodoTask = taskGroupInfoList.getJSONObject(i)
-                    val taskInfoList = antDodoTask.getJSONArray("taskInfoList")
-                    for (j in 0 until taskInfoList.length()) {
-                        val taskInfo = taskInfoList.getJSONObject(j)
-                        val taskBaseInfo = taskInfo.getJSONObject("taskBaseInfo")
-                        val bizInfo = JSONObject(taskBaseInfo.optString("bizInfo", "{}"))
-                        val taskType = taskBaseInfo.getString("taskType")
-                        val taskTitle = bizInfo.optString("taskTitle", taskType)
-                        val awardCount = bizInfo.optString("awardCount", "1")
-                        val sceneCode = taskBaseInfo.getString("sceneCode")
-                        val taskStatus = taskBaseInfo.getString("taskStatus")
-                        val taskKey = buildTaskKey(sceneCode, taskType)
-                        when {
-                            TaskStatus.FINISHED.name == taskStatus -> {
-                                if (handledTaskAwards.contains(taskKey)) {
-                                    continue
-                                }
-                                val awardResponse = AntDodoRpcCall.receiveTaskAward(sceneCode, taskType)
-                                if (awardResponse.isNullOrEmpty()) {
-                                    Log.runtime(TAG, "receiveTaskAward返回空")
-                                    continue
-                                }
-                                val joAward = JSONObject(awardResponse)
-                                if (isDodoTaskRpcSuccess(joAward)) {
-                                    handledTaskAwards.add(taskKey)
-                                    doubleCheck = true
-                                    Log.dodo("任务奖励🎖️[$taskTitle]#${awardCount}个")
-                                } else {
-                                    Log.dodo("领取失败[$taskTitle]：${joAward.optString("resultDesc", joAward.toString())}")
-                                    if (isTaskTerminalFailure(joAward)) {
-                                        handledTaskAwards.add(taskKey)
-                                    }
-                                }
-                            }
-                            TaskStatus.TODO.name == taskStatus -> {
-                                if (businessDrivenTasks.contains(taskType)) {
-                                    Log.runtime(TAG, "任务等待业务动作完成[$taskTitle]")
-                                    continue
-                                }
-                                if (TaskBlacklist.isTaskInBlacklist(TASK_BLACKLIST_MODULE, taskType) ||
-                                    TaskBlacklist.isTaskInBlacklist(TASK_BLACKLIST_MODULE, taskTitle)
-                                ) {
-                                    continue
-                                }
-                                if (handledTaskFinishes.contains(taskKey)) {
-                                    continue
-                                }
-
-                                val finishResponse = finishTodoTask(taskBaseInfo, bizInfo, sceneCode, taskType)
-                                if (finishResponse.isNullOrEmpty()) {
-                                    Log.runtime(TAG, "finishTask返回空")
-                                    continue
-                                }
-                                val joFinishTask = JSONObject(finishResponse)
-                                if (isDodoTaskRpcSuccess(joFinishTask)) {
-                                    handledTaskFinishes.add(taskKey)
-                                    Log.dodo("物种任务🧾️[$taskTitle]")
-                                    doubleCheck = true
-                                } else {
-                                    val errorCode = joFinishTask.optString("code")
-                                        .ifBlank { joFinishTask.optString("resultCode") }
-                                    val resultDesc = joFinishTask.optString("desc")
-                                        .ifBlank { joFinishTask.optString("resultDesc") }
-                                    Log.dodo("完成任务失败[$taskTitle] code=${errorCode.ifBlank { "UNKNOWN" }} msg=$resultDesc"
-                                    )
-                                    if (isTaskTerminalFailure(joFinishTask)) {
-                                        handledTaskFinishes.add(taskKey)
-                                    }
-                                    val blacklistReason = errorCode.ifBlank { resultDesc }
-                                    if (blacklistReason.isNotBlank()) {
-                                        TaskBlacklist.autoAddToBlacklist(
-                                            TASK_BLACKLIST_MODULE,
-                                            taskType,
-                                            taskTitle,
-                                            blacklistReason
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                        GlobalThreadPools.sleepCompat(500)
-                    }
-                }
-                if (!doubleCheck) break
-            }
+            TaskFlowEngine(DodoTaskFlowAdapter(), roundSleepMs = 500L).run()
         } catch (e: JSONException) {
             Log.error(TAG, "JSON解析错误: ${e.message}")
             Log.printStackTrace(TAG, e)
@@ -358,23 +266,302 @@ class AntDodo : ModelTask() {
         return "$sceneCode|$taskType"
     }
 
+    private inner class DodoTaskFlowAdapter : TaskFlowAdapter {
+        override val moduleName: String = TASK_BLACKLIST_MODULE
+        override val flowName: String = "神奇物种任务"
+
+        override fun query(): JSONObject {
+            val response = AntDodoRpcCall.taskList()
+            if (response.isNullOrEmpty()) {
+                return JSONObject()
+                    .put("success", false)
+                    .put("resultDesc", "taskList返回空")
+            }
+            return JSONObject(response)
+        }
+
+        override fun isQuerySuccess(response: JSONObject): Boolean {
+            return ResChecker.checkRes(TAG, response)
+        }
+
+        override fun extractItems(response: JSONObject): List<TaskFlowItem> {
+            val taskGroupInfoList = response.optJSONObject("data")?.optJSONArray("taskGroupInfoList")
+                ?: return emptyList()
+            val items = mutableListOf<TaskFlowItem>()
+            for (i in 0 until taskGroupInfoList.length()) {
+                val taskGroup = taskGroupInfoList.optJSONObject(i) ?: continue
+                val taskInfoList = taskGroup.optJSONArray("taskInfoList") ?: continue
+                for (j in 0 until taskInfoList.length()) {
+                    val taskInfo = taskInfoList.optJSONObject(j) ?: continue
+                    val taskBaseInfo = taskInfo.optJSONObject("taskBaseInfo") ?: continue
+                    val bizInfo = parseDodoBizInfo(taskBaseInfo.opt("bizInfo"))
+                    val taskType = taskBaseInfo.optString("taskType").trim()
+                    if (taskType.isBlank()) {
+                        continue
+                    }
+                    val taskTitle = bizInfo.optString("taskTitle", taskType).trim().ifBlank { taskType }
+                    val sceneCode = taskBaseInfo.optString("sceneCode").trim()
+                    val taskStatus = taskBaseInfo.optString("taskStatus").trim()
+                    val awardCount = bizInfo.optString("awardCount", "1").trim().ifBlank { "1" }
+                    val raw = JSONObject()
+                        .put("taskInfo", taskInfo)
+                        .put("taskBaseInfo", taskBaseInfo)
+                        .put("bizInfo", bizInfo)
+                        .put("taskKey", buildTaskKey(sceneCode, taskType))
+                        .put("awardCount", awardCount)
+
+                    items.add(
+                        TaskFlowItem(
+                            id = taskType,
+                            title = taskTitle,
+                            status = taskStatus,
+                            type = taskType,
+                            sceneCode = sceneCode,
+                            actionType = taskBaseInfo.optString("actionType")
+                                .ifBlank { bizInfo.optString("actionType") },
+                            blacklistKeys = listOf(taskType, taskTitle).filter { it.isNotBlank() },
+                            raw = raw,
+                            progress = "award=$awardCount"
+                        )
+                    )
+                }
+            }
+            return items
+        }
+
+        override fun mapPhase(item: TaskFlowItem): TaskFlowPhase {
+            return when (item.status) {
+                TaskStatus.FINISHED.name,
+                "COMPLETE",
+                "WAIT_RECEIVE",
+                "TO_RECEIVE" -> TaskFlowPhase.REWARD_READY
+
+                TaskStatus.TODO.name,
+                "WAIT_COMPLETE" -> if (item.type in BUSINESS_DRIVEN_TASK_TYPES) {
+                    TaskFlowPhase.BUSINESS_ACTION
+                } else {
+                    TaskFlowPhase.READY_TO_COMPLETE
+                }
+
+                TaskStatus.RECEIVED.name,
+                "HAS_RECEIVED",
+                "DONE",
+                "COMPLETED" -> TaskFlowPhase.TERMINAL
+
+                else -> TaskFlowPhase.UNKNOWN
+            }
+        }
+
+        override fun shouldSkip(item: TaskFlowItem): Boolean {
+            val taskKey = buildTaskKey(item.sceneCode, item.type)
+            return when {
+                handledTaskAwards.contains(taskKey) && mapPhase(item) == TaskFlowPhase.REWARD_READY -> true
+                handledTaskFinishes.contains(taskKey) && mapPhase(item) == TaskFlowPhase.READY_TO_COMPLETE -> true
+                else -> false
+            }
+        }
+
+        override fun receive(item: TaskFlowItem): TaskFlowActionResult {
+            val response = AntDodoRpcCall.receiveTaskAward(item.sceneCode, item.type)
+            if (response.isNullOrEmpty()) {
+                return emptyActionResponse("AntDodoRpcCall.receiveTaskAward", item, "receiveTaskAward")
+            }
+            val result = JSONObject(response)
+            if (isDodoTaskRpcSuccess(result)) {
+                val awardCount = item.raw?.optString("awardCount", "1") ?: "1"
+                Log.dodo("任务奖励🎖️[${item.title}]#${awardCount}个")
+                return TaskFlowActionResult.success()
+            }
+            return dodoActionFailureResult(
+                response = result,
+                rpc = "AntDodoRpcCall.receiveTaskAward",
+                detail = dodoActionDetail(item, "receiveTaskAward")
+            )
+        }
+
+        override fun complete(item: TaskFlowItem): TaskFlowActionResult {
+            val raw = item.raw ?: return missingRawResult(item, "finishTask")
+            val taskBaseInfo = raw.optJSONObject("taskBaseInfo") ?: return missingRawResult(item, "finishTask")
+            val bizInfo = raw.optJSONObject("bizInfo") ?: JSONObject()
+            val response = finishTodoTask(taskBaseInfo, bizInfo, item.sceneCode, item.type)
+            if (response.isNullOrEmpty()) {
+                return emptyActionResponse("AntDodoRpcCall.finishTask", item, "finishTask")
+            }
+            val result = JSONObject(response)
+            if (isDodoTaskRpcSuccess(result)) {
+                Log.dodo("物种任务🧾️[${item.title}]")
+                return TaskFlowActionResult.success()
+            }
+            return dodoActionFailureResult(
+                response = result,
+                rpc = "AntDodoRpcCall.finishTask",
+                detail = dodoActionDetail(item, "finishTask")
+            )
+        }
+
+        override fun actionKey(item: TaskFlowItem, action: TaskFlowAction): String {
+            val taskKey = buildTaskKey(item.sceneCode, item.type)
+            return when (action) {
+                TaskFlowAction.RECEIVE -> "receive:$taskKey"
+                TaskFlowAction.COMPLETE -> "complete:$taskKey"
+                else -> super<TaskFlowAdapter>.actionKey(item, action)
+            }
+        }
+
+        override fun afterSuccess(item: TaskFlowItem, action: TaskFlowAction, result: TaskFlowActionResult) {
+            rememberHandledTask(item, action)
+        }
+
+        override fun afterFailure(
+            item: TaskFlowItem,
+            action: TaskFlowAction,
+            result: TaskFlowActionResult,
+            decision: TaskFlowDecision
+        ) {
+            if (decision == TaskFlowDecision.MARK_HANDLED ||
+                decision == TaskFlowDecision.STOP_TODAY_OR_CURRENT_CHAIN ||
+                decision == TaskFlowDecision.BLACKLIST
+            ) {
+                rememberHandledTask(item, action)
+            }
+        }
+
+        override fun onQueryFailed(response: JSONObject) {
+            Log.error(TAG, "神奇物种任务列表查询失败 raw=$response")
+        }
+
+        override fun logInfo(message: String) {
+            Log.dodo(message)
+        }
+
+        override fun logError(message: String) {
+            Log.error(TAG, message)
+        }
+
+        private fun rememberHandledTask(item: TaskFlowItem, action: TaskFlowAction) {
+            val taskKey = buildTaskKey(item.sceneCode, item.type)
+            when (action) {
+                TaskFlowAction.RECEIVE -> handledTaskAwards.add(taskKey)
+                TaskFlowAction.COMPLETE -> handledTaskFinishes.add(taskKey)
+                else -> Unit
+            }
+        }
+
+        private fun emptyActionResponse(
+            rpc: String,
+            item: TaskFlowItem,
+            phase: String
+        ): TaskFlowActionResult {
+            return TaskFlowActionResult.failure(
+                failureType = TaskRpcFailureType.RETRYABLE_RPC,
+                message = "${phase}返回空",
+                rpc = rpc,
+                detail = dodoActionDetail(item, phase),
+                stopCurrentRound = true
+            )
+        }
+
+        private fun missingRawResult(item: TaskFlowItem, phase: String): TaskFlowActionResult {
+            return TaskFlowActionResult.failure(
+                failureType = TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW,
+                message = "缺少任务原始数据",
+                rpc = "DodoTaskFlowAdapter.$phase",
+                detail = dodoActionDetail(item, phase)
+            )
+        }
+    }
+
+    private fun dodoActionFailureResult(
+        response: JSONObject,
+        rpc: String,
+        detail: String
+    ): TaskFlowActionResult {
+        val code = extractDodoTaskFailureCode(response)
+        val message = extractDodoTaskFailureMessage(response)
+        return TaskFlowActionResult.failure(
+            failureType = classifyDodoTaskFailure(response),
+            code = code,
+            message = message,
+            rpc = rpc,
+            raw = response.toString(),
+            detail = detail
+        )
+    }
+
+    private fun dodoActionDetail(item: TaskFlowItem, phase: String): String {
+        return "taskType=${item.type} sceneCode=${item.sceneCode} action=$phase"
+    }
+
+    private fun parseDodoBizInfo(rawBizInfo: Any?): JSONObject {
+        return when (rawBizInfo) {
+            is JSONObject -> rawBizInfo
+            is String -> rawBizInfo.takeIf { it.isNotBlank() }?.let {
+                runCatching { JSONObject(it) }.getOrElse { JSONObject() }
+            } ?: JSONObject()
+            else -> JSONObject()
+        }
+    }
+
     private fun isDodoTaskRpcSuccess(response: JSONObject): Boolean {
         return response.optBoolean("success") ||
+            response.optBoolean("isSuccess") ||
             response.optString("code") == "100000000" ||
             response.optString("resultCode").equals("SUCCESS", ignoreCase = true)
     }
 
-    private fun isTaskTerminalFailure(response: JSONObject): Boolean {
+    private fun classifyDodoTaskFailure(response: JSONObject): TaskRpcFailureType {
+        val code = extractDodoTaskFailureCode(response)
+        val desc = extractDodoTaskFailureMessage(response)
+        return when {
+            code in setOf("400000030", "400000012") ||
+                containsAny(desc, "已领取", "已经领取", "重复领取", "重复领奖", "重复完成", "已完成", "任务已完结", "任务已结束") ->
+                TaskRpcFailureType.TERMINAL_DONE
+
+            containsAny(desc, "权益获取次数超过上限", "上限", "不可领取", "资格不足", "风控", "风险") ||
+                code == "CAMP_TRIGGER_ERROR" ||
+                code.contains("LIMIT", ignoreCase = true) ->
+                TaskRpcFailureType.BUSINESS_LIMIT
+
+            code == "400000040" ||
+                containsAny(desc, "不支持rpc调用", "不支持RPC完成") ->
+                TaskRpcFailureType.UNSUPPORTED_NO_CLOSURE
+
+            code in setOf("20020012", "TASK_ID_INVALID", "ILLEGAL_ARGUMENT", "PROMISE_TEMPLATE_NOT_EXIST") ||
+                containsAny(desc, "参数错误", "任务ID非法", "模板不存在") ->
+                TaskRpcFailureType.NON_RETRYABLE_INVALID
+
+            code in setOf("3000", "REMOTE_INVOKE_EXCEPTION", "OP_REPEAT_CHECK") ||
+                containsAny(desc, "系统出错", "系统繁忙", "稍后", "繁忙", "频繁", "重试") ||
+                isDodoFailureMarkedRetryable(response) ->
+                TaskRpcFailureType.RETRYABLE_RPC
+
+            else -> TaskRpcFailureType.UNKNOWN_NEEDS_REVIEW
+        }
+    }
+
+    private fun extractDodoTaskFailureCode(response: JSONObject): String {
         val code = response.optString("code")
             .ifBlank { response.optString("errorCode") }
             .ifBlank { response.optString("resultCode") }
-        val desc = response.optString("desc")
+        return code
+    }
+
+    private fun extractDodoTaskFailureMessage(response: JSONObject): String {
+        return response.optString("desc")
             .ifBlank { response.optString("errorMsg") }
             .ifBlank { response.optString("resultDesc") }
-        return code == "400000030" ||
-            code == "400000012" ||
-            desc.contains("任务已完结") ||
-            desc.contains("权益获取次数超过上限")
+            .ifBlank { response.optString("memo") }
+            .ifBlank { response.toString() }
+    }
+
+    private fun isDodoFailureMarkedRetryable(response: JSONObject): Boolean {
+        return listOf("retryable", "retriable", "canRetry").any { key ->
+            response.has(key) && response.optBoolean(key, false)
+        }
+    }
+
+    private fun containsAny(text: String, vararg keywords: String): Boolean {
+        return keywords.any { keyword -> text.contains(keyword, ignoreCase = true) }
     }
 
     private fun finishTodoTask(
@@ -945,10 +1132,8 @@ class AntDodo : ModelTask() {
 
     private fun autoGenerateBook() {
         try {
-            AntDodoRpcCall.invalidateBookCache()
             val generatedBookIds = LinkedHashSet<String>()
             generateCurrentBookIfReminded()?.let { generatedBookIds.add(it) }
-            AntDodoRpcCall.invalidateBookCache()
             var hasMore: Boolean
             var pageStart = 0
             do {
@@ -1149,6 +1334,7 @@ class AntDodo : ModelTask() {
     companion object {
         private val TAG = AntDodo::class.java.simpleName
         private const val TASK_BLACKLIST_MODULE = "神奇物种"
+        private val BUSINESS_DRIVEN_TASK_TYPES = setOf("HELP_FRIEND_COLLECT")
     }
 }
 

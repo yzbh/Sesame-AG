@@ -3,9 +3,9 @@ package io.github.aoguai.sesameag.task.antSports
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
+import io.github.aoguai.sesameag.entity.RpcEntity
 import io.github.aoguai.sesameag.hook.ApplicationHook
 import io.github.aoguai.sesameag.hook.RequestManager
-import io.github.aoguai.sesameag.util.RpcCache
 import java.util.UUID
 
 /**
@@ -84,8 +84,18 @@ object AntSportsRpcCall {
         "com.alipay.neverland.biz.rpc.queryTaskInfo"
     private const val NEVERLAND_QUERY_BUBBLE_TASK_RPC =
         "com.alipay.neverland.biz.rpc.queryBubbleTask"
+    private const val NEVERLAND_QUERY_MAP_LIST_RPC =
+        "com.alipay.neverland.biz.rpc.queryMapList"
+    private const val NEVERLAND_QUERY_MAP_INFO_NEW_RPC =
+        "com.alipay.neverland.biz.rpc.queryMapInfoNew"
+    private const val NEVERLAND_QUERY_BASEINFO_RPC =
+        "com.alipay.neverland.biz.rpc.queryBaseinfo"
+    private const val NEVERLAND_QUERY_MAP_DETAIL_RPC =
+        "com.alipay.neverland.biz.rpc.queryMapDetail"
     internal const val QUERY_WALK_STEP_RPC =
         "alipay.antsports.steps.query"
+    private const val MOTION_QUIZ_BIZ_TYPE = "MOTION_DAILY_QUIZ"
+    private const val MOTION_QUIZ_CHANNEL_RPC = "alipay.iblib.channel.data"
 
     //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // 运动任务面板接口
@@ -101,7 +111,6 @@ object AntSportsRpcCall {
      * @remark 对应API：com.alipay.sportshealth.biz.rpc.SportsHealthCoinTaskRpc.queryCoinTaskPanel
      */
     fun queryCoinTaskPanel(): String {
-        RpcCache.invalidate(QUERY_COIN_TASK_PANEL_RPC)
         val args1 = """[{"apiVersion":"energy","canAddHome":false,"chInfo":"medical_health","clientAuthStatus":"not_support","clientOS":"android","features":$FEATURES,"topTaskId":""}]"""
         return RequestManager.requestString(QUERY_COIN_TASK_PANEL_RPC, args1)
     }
@@ -194,6 +203,79 @@ object AntSportsRpcCall {
 
     private fun buildSportsTaskBizNo(): String {
         return "${System.currentTimeMillis()}-${UUID.randomUUID()}"
+    }
+
+    //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 运动问答接口
+    //━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    private fun requestMotionQuizChannelData(activityCode: String, activityId: String, body: JSONObject): String {
+        val args = JSONArray().put(JSONObject().apply {
+            put("activityCode", activityCode)
+            put("activityId", activityId)
+            put("body", body)
+            put("version", "2.0")
+        })
+        return RequestManager.requestString(MOTION_QUIZ_CHANNEL_RPC, args.toString())
+    }
+
+    fun queryMotionQuizBlockDetail(queryDate: Long): String {
+        val body = JSONObject().apply {
+            put("bizType", MOTION_QUIZ_BIZ_TYPE)
+            put("cityCode", CITY_CODE)
+            put("queryDate", queryDate)
+            put("queryVersion", 2)
+            put("scene", "single_day")
+            put("schemeParams", JSONObject().apply {
+                put("queryPrizeParams", true)
+            })
+        }
+        return requestMotionQuizChannelData(
+            "query_quiz_block_detail",
+            "2023041700010001",
+            body
+        )
+    }
+
+    fun answerMotionQuiz(quizId: String, answer: String, gmtStartAnswer: Long): String {
+        val body = JSONObject().apply {
+            val now = System.currentTimeMillis()
+            put("answer", answer)
+            put("bizType", MOTION_QUIZ_BIZ_TYPE)
+            put("gmtAnswer", now)
+            put("gmtStartAnswer", gmtStartAnswer)
+            put("quizId", quizId)
+        }
+        return requestMotionQuizChannelData(
+            "answer_quiz",
+            "2023041700030001",
+            body
+        )
+    }
+
+    fun queryMotionQuizAward(quizId: String): String {
+        val body = JSONObject().apply {
+            put("bizType", MOTION_QUIZ_BIZ_TYPE)
+            put("quizId", quizId)
+        }
+        return requestMotionQuizChannelData(
+            "answer_quiz_award",
+            "2025081410521001",
+            body
+        )
+    }
+
+    fun clickMotionQuizReceiveSort(quizId: String, creativityId: String): String {
+        val body = JSONObject().apply {
+            put("bizType", MOTION_QUIZ_BIZ_TYPE)
+            put("creativityId", creativityId)
+            put("quizId", quizId)
+        }
+        return requestMotionQuizChannelData(
+            "click_receive_sort",
+            "2025102200108020",
+            body
+        )
     }
 
     /**
@@ -301,7 +383,6 @@ object AntSportsRpcCall {
      */
     fun queryEnergyBubbleModule(): String {
         val args1 = """[{"apiVersion":"energy","bubbleId":"","canAddHome":false,"chInfo":"$HOME_CH_INFO","clientAuthStatus":"not_support","clientOS":"android","distributionChannel":"","features":$FEATURES,"outBizNo":""}]"""
-        RpcCache.invalidate(QUERY_ENERGY_BUBBLE_MODULE_RPC)
         return RequestManager.requestString(QUERY_ENERGY_BUBBLE_MODULE_RPC, args1)
     }
 
@@ -1564,11 +1645,191 @@ object AntSportsRpcCall {
          * @remark 对应API：com.alipay.neverland.biz.rpc.queryBubbleTask
          */
         fun queryBubbleTask(source: String = DEFAULT_SOURCE): String {
-            RpcCache.invalidate(NEVERLAND_QUERY_BUBBLE_TASK_RPC)
             return RequestManager.requestString(
                 NEVERLAND_QUERY_BUBBLE_TASK_RPC,
                 """[{"source":"$source","sportsAuthed":true}]"""
             )
+        }
+
+        fun queryExchangeCondition(source: String): String {
+            val args = JSONArray().put(JSONObject().apply {
+                put("assetType", "RED_PACKAGE_PIECE")
+                put("source", source)
+            }).toString()
+            return RequestManager.requestString(
+                "com.alipay.neverland.biz.rpc.queryExchangeCondition",
+                args
+            )
+        }
+
+        fun autoRecommendItem(source: String, needEnergyValue: String = "1"): String {
+            val args = JSONArray().put(JSONObject().apply {
+                put("extInfo", JSONObject().put("needEnergyValue", needEnergyValue))
+                put("filterItemSalePrice", true)
+                put("filterItemStatus", true)
+                put("source", source)
+            }).toString()
+            return RequestManager.requestString(
+                "com.alipay.neverland.biz.rpc.autoRecommendItem",
+                args
+            )
+        }
+
+        private fun sportsItemMallFeatures(): JSONArray {
+            return JSONArray().apply {
+                listOf(
+                    "DAILY_STEPS_RANK_V2",
+                    "STEP_BATTLE",
+                    "CLUB_HOME_CARD",
+                    "NEW_HOME_PAGE_STATIC",
+                    "CLOUD_SDK_AUTH",
+                    "STAY_ON_COMPLETE",
+                    "EXTRA_TREASURE_BOX",
+                    "SUPPORT_AI",
+                    "SUPPORT_TAB3",
+                    "SUPPORT_FLYRABBIT",
+                    "SUPPORT_NEW_MATCH",
+                    "EXTERNAL_ADVERTISEMENT_TASK",
+                    "PROP",
+                    "PROPV2",
+                    "ASIAN_GAMES"
+                ).forEach { put(it) }
+            }
+        }
+
+        fun queryCoinCenterPage(): String {
+            val args = JSONArray().put(JSONObject().apply {
+                put("canAddHome", false)
+                put("chInfo", "xzyd1031")
+                put("clientAuthStatus", "not_support")
+                put("clientOS", "android")
+                put("features", sportsItemMallFeatures())
+                put("topTaskId", "")
+            }).toString()
+            return RequestManager.requestString(
+                "com.alipay.sportshealth.biz.rpc.SportsHealthCoinCenterRpc.queryCoinCenterPage",
+                args
+            )
+        }
+
+        fun deliverSportsItemMallPage(pageCode: String = "@alipay/alipaysports/property"): String {
+            val args = JSONArray().put(JSONObject().apply {
+                put("extInfo", JSONObject())
+                put("pageCode", pageCode)
+            }).toString()
+            return RequestManager.requestString(
+                "com.alipay.promofrontcenter.deliver.deliverByPageId",
+                args
+            )
+        }
+
+        fun queryItemCategoryList(): String {
+            val args = JSONArray().put(JSONObject().apply {
+                put("chInfo", "xzyd1031")
+                put("clientOS", "android")
+                put("features", sportsItemMallFeatures())
+                put("sceneId", "SPORT_ITEM_MALL")
+                put("source", "SPORT")
+            }).toString()
+            return RequestManager.requestString(
+                "com.alipay.neverland.biz.rpc.queryItemCategoryList",
+                args
+            )
+        }
+
+        fun queryItemList(
+            categoryType: String = "",
+            pageNum: Int = 1,
+            pageSize: Int = 10,
+            cityCode: String = "440100",
+            adSession: String = ""
+        ): String {
+            val args = JSONArray().put(JSONObject().apply {
+                put("adSession", adSession)
+                put("categoryType", categoryType)
+                put("chInfo", "xzyd1031")
+                put("cityCode", cityCode)
+                put("clientOS", "android")
+                put("features", sportsItemMallFeatures())
+                put("pageNum", pageNum)
+                put("pageSize", pageSize)
+                put("recommendItemIdList", JSONArray())
+                put("sceneId", "SPORT_ITEM_MALL")
+                put("source", "SPORT")
+            }).toString()
+            return RequestManager.requestString(
+                "com.alipay.neverland.biz.rpc.queryItemList",
+                args
+            )
+        }
+
+        fun queryItemDetail(
+            benefitId: String,
+            itemId: String,
+            materialType: String,
+            cityCode: String = "440100",
+            apDid: String = ""
+        ): String {
+            val args = JSONArray().put(JSONObject().apply {
+                if (apDid.isNotBlank()) {
+                    put("apDid", apDid)
+                }
+                put("benefitId", benefitId)
+                put("cityCode", cityCode)
+                put("itemId", itemId)
+                put("materialType", materialType)
+            }).toString()
+            return RequestManager.requestString(RpcEntity(
+                requestMethod = "com.alipay.neverland.biz.rpc.queryItemDetail",
+                requestData = args,
+                appName = "neverland",
+                methodName = "queryItemDetail",
+                facadeName = "NeverlandBenefitCenterRpc"
+            ))
+        }
+
+        fun createOrder(
+            benefitId: String,
+            itemId: String,
+            cityCode: String = "440100",
+            apDid: String = ""
+        ): String {
+            val args = JSONArray().put(JSONObject().apply {
+                if (apDid.isNotBlank()) {
+                    put("apDid", apDid)
+                }
+                put("benefitId", benefitId)
+                put("chInfo", "xzyd1031")
+                put("cityCode", cityCode)
+                put("itemId", itemId)
+                put("source", "SPORT")
+            }).toString()
+            return RequestManager.requestString(RpcEntity(
+                requestMethod = "com.alipay.neverland.biz.rpc.createOrder",
+                requestData = args,
+                appName = "neverland",
+                methodName = "createOrder",
+                facadeName = "NeverlandBenefitCenterRpc"
+            ))
+        }
+
+        fun collectExchangeData(cityCode: String = "440100", apDid: String = ""): String {
+            val args = JSONArray().put(JSONObject().apply {
+                if (apDid.isNotBlank()) {
+                    put("apDid", apDid)
+                }
+                put("cityCode", cityCode)
+                put("collectType", "LOG_REPORT")
+                put("scene", "BENEFIT_CENTER")
+                put("subScene", "exchange")
+            }).toString()
+            return RequestManager.requestString(RpcEntity(
+                requestMethod = "com.alipay.neverland.biz.rpc.collectData",
+                requestData = args,
+                appName = "neverland",
+                methodName = "collectData",
+                facadeName = "NeverlandDataCollectRpc"
+            ))
         }
 
         /**
@@ -1621,7 +1882,6 @@ object AntSportsRpcCall {
          * @remark 对应API：com.alipay.neverland.biz.rpc.queryTaskCenter
          */
         fun queryTaskCenter(source: String = DEFAULT_SOURCE): String {
-            RpcCache.invalidate(NEVERLAND_QUERY_TASK_CENTER_RPC)
             return RequestManager.requestString(
                 NEVERLAND_QUERY_TASK_CENTER_RPC,
                 """[{"apDid":"6b30jO17Z6Wbr2ggRytFxB09hZdhixfSekjytgi9Ytc=","cityCode":"","deviceLevel":"high","newGame":0,"source":"$source"}]"""
@@ -1639,7 +1899,6 @@ object AntSportsRpcCall {
          * @remark 对应API：com.alipay.neverland.biz.rpc.queryTaskInfo
          */
         fun queryTaskInfo(source: String, type: String): String {
-            RpcCache.invalidate(NEVERLAND_QUERY_TASK_INFO_RPC)
             return RequestManager.requestString(
                 NEVERLAND_QUERY_TASK_INFO_RPC,
                 """[{"source":"$source","type":"$type"}]"""
@@ -1738,7 +1997,7 @@ object AntSportsRpcCall {
          */
         fun queryMapList(source: String = DEFAULT_SOURCE): String {
             return RequestManager.requestString(
-                "com.alipay.neverland.biz.rpc.queryMapList",
+                NEVERLAND_QUERY_MAP_LIST_RPC,
                 """[{"source":"$source"}]"""
             )
         }
@@ -1782,7 +2041,7 @@ object AntSportsRpcCall {
             source: String = DEFAULT_SOURCE
         ): String {
             return RequestManager.requestString(
-                "com.alipay.neverland.biz.rpc.queryMapInfoNew",
+                NEVERLAND_QUERY_MAP_INFO_NEW_RPC,
                 """[{"branchId":"$branchId","mapId":"$mapId","source":"$source"}]"""
             )
         }
@@ -1796,8 +2055,28 @@ object AntSportsRpcCall {
          */
         fun queryBaseinfo(source: String = DEFAULT_SOURCE): String {
             return RequestManager.requestString(
-                "com.alipay.neverland.biz.rpc.queryBaseinfo",
+                NEVERLAND_QUERY_BASEINFO_RPC,
                 """[{"source":"$source"}]"""
+            )
+        }
+
+        fun queryBaseinfo(
+            branchId: String,
+            mapId: String,
+            fromMapId: String?,
+            source: String = DEFAULT_SOURCE
+        ): String {
+            val obj = JSONObject().apply {
+                put("branchId", branchId)
+                if (!fromMapId.isNullOrBlank()) {
+                    put("fromMapId", fromMapId)
+                }
+                put("mapId", mapId)
+                put("source", source)
+            }
+            return RequestManager.requestString(
+                NEVERLAND_QUERY_BASEINFO_RPC,
+                JSONArray().put(obj).toString()
             )
         }
 
@@ -1813,10 +2092,11 @@ object AntSportsRpcCall {
          * @remark 对应API：com.alipay.neverland.biz.rpc.build
          */
         fun build(branchId: String, mapId: String, multiNum: Int, source: String = DEFAULT_SOURCE): String {
-            return RequestManager.requestString(
+            val result = RequestManager.requestString(
                 "com.alipay.neverland.biz.rpc.build",
                 """[{"branchId":"$branchId","mapId":"$mapId","multiNum":$multiNum,"source":"$source"}]"""
             )
+            return result
         }
 
         /**
@@ -1842,7 +2122,7 @@ object AntSportsRpcCall {
          */
         fun queryMapDetail(mapId: String, source: String = DEFAULT_SOURCE): String {
             return RequestManager.requestString(
-                "com.alipay.neverland.biz.rpc.queryMapDetail",
+                NEVERLAND_QUERY_MAP_DETAIL_RPC,
                 """[{"mapId":"$mapId","source":"$source"}]"""
             )
         }
@@ -1859,10 +2139,11 @@ object AntSportsRpcCall {
          * @remark 对应API：com.alipay.neverland.biz.rpc.mapStageReward
          */
         fun mapStageReward(branchId: String, level: Int, mapId: String, source: String = DEFAULT_SOURCE): String {
-            return RequestManager.requestString(
+            val result = RequestManager.requestString(
                 "com.alipay.neverland.biz.rpc.mapStageReward",
                 """[{"branchId":"$branchId","level":$level,"mapId":"$mapId","source":"$source"}]"""
             )
+            return result
         }
 
         /**
@@ -1882,10 +2163,11 @@ object AntSportsRpcCall {
             rewardId: String,
             source: String = DEFAULT_SOURCE
         ): String {
-            return RequestManager.requestString(
+            val result = RequestManager.requestString(
                 "com.alipay.neverland.biz.rpc.mapChooseReward",
                 """[{"branchId":"$branchId","channel":"$source","mapId":"$mapId","rewardId":"$rewardId","source":"$source"}]"""
             )
+            return result
         }
 
         /**
@@ -1899,10 +2181,11 @@ object AntSportsRpcCall {
          * @remark 对应API：com.alipay.neverland.biz.rpc.mapChooseFree
          */
         fun chooseMap(branchId: String, mapId: String, source: String = DEFAULT_SOURCE): String {
-            return RequestManager.requestString(
+            val result = RequestManager.requestString(
                 "com.alipay.neverland.biz.rpc.mapChooseFree",
                 """[{"branchId":"$branchId","mapId":"$mapId","source":"$source"}]"""
             )
+            return result
         }
 
         /**

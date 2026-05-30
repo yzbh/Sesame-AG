@@ -2,7 +2,11 @@ package io.github.aoguai.sesameag.hook
 
 import android.content.Context
 import android.content.Intent
+import io.github.aoguai.sesameag.hook.keepalive.UnifiedScheduler
 import io.github.aoguai.sesameag.model.Model
+import io.github.aoguai.sesameag.task.antFarm.AntFarm
+import io.github.aoguai.sesameag.task.antMember.AntMember
+import io.github.aoguai.sesameag.task.antSports.AntSports
 import io.github.aoguai.sesameag.task.customTasks.CustomTask
 import io.github.aoguai.sesameag.task.customTasks.ManualTask
 import io.github.aoguai.sesameag.task.customTasks.ManualTaskModel
@@ -10,6 +14,7 @@ import io.github.aoguai.sesameag.util.GlobalThreadPools.execute
 import io.github.aoguai.sesameag.util.Log.record
 import io.github.aoguai.sesameag.util.TimeUtil
 import io.github.aoguai.sesameag.util.WorkflowRootGuard
+import io.github.aoguai.sesameag.util.maps.UserMap
 
 internal object ApplicationBroadcastDispatcher {
     private const val TAG = ApplicationHook.TAG
@@ -30,6 +35,9 @@ internal object ApplicationBroadcastDispatcher {
             ApplicationHookConstants.BroadcastActions.RE_LOGIN -> ApplicationHook.reOpenApp()
             ApplicationHookConstants.BroadcastActions.RPC_TEST -> handleRpcTest(safeIntent)
             ApplicationHookConstants.BroadcastActions.MANUAL_TASK -> handleManualTaskBroadcast(safeIntent)
+            ApplicationHookConstants.BroadcastActions.HOOK_READY -> handleHookReadyBroadcast(context, safeIntent)
+            ApplicationHookConstants.BroadcastActions.REFRESH_FRIENDS -> handleRefreshFriendsBroadcast(context, safeIntent)
+            ApplicationHookConstants.BroadcastActions.REFRESH_EXCHANGE_OPTIONS -> handleRefreshExchangeOptionsBroadcast(context, safeIntent)
         }
     }
 
@@ -100,10 +108,10 @@ internal object ApplicationBroadcastDispatcher {
             dedupeKey = if (executionTimeMillis > 0) "prewakeup_$executionTimeMillis" else "prewakeup"
         )
 
-        io.github.aoguai.sesameag.hook.keepalive.SmartSchedulerManager.initialize(ctx)
+        UnifiedScheduler.initialize(ctx)
         if (executionTimeMillis > 0 && delayMillis > 0) {
             record(TAG, "收到 prewakeup，计划在 ${TimeUtil.getCommonDate(executionTimeMillis)} 执行 (delay=${TimeUtil.formatDuration(delayMillis)})")
-            io.github.aoguai.sesameag.hook.keepalive.SmartSchedulerManager.schedule(delayMillis, "prewakeup_execute") {
+            UnifiedScheduler.scheduleLongDelay(delayMillis, "prewakeup_execute") {
                 ApplicationHookCore.requestExecution(triggerAtExecTime)
             }
             return
@@ -111,6 +119,249 @@ internal object ApplicationBroadcastDispatcher {
 
         record(TAG, "收到 prewakeup，但 execution_time 无效/已过期，立即触发一次执行链路")
         ApplicationHookCore.requestExecution(triggerAtExecTime)
+    }
+
+    private fun handleHookReadyBroadcast(context: Context?, intent: Intent) {
+        val ctx = context?.applicationContext ?: context ?: ApplicationHook.appContext
+        val targetUserId = intent.getStringExtra("userId")?.trim().orEmpty()
+        val loader = ApplicationHook.classLoader
+        if (loader == null) {
+            sendHookReadyResult(
+                ctx,
+                targetUserId,
+                ready = false,
+                message = "目标应用 Hook 尚未就绪"
+            )
+            return
+        }
+
+        val currentUserId = HookUtil.getUserId(loader)?.trim().orEmpty()
+        when {
+            currentUserId.isEmpty() -> sendHookReadyResult(
+                ctx,
+                targetUserId,
+                ready = false,
+                message = "当前支付宝账号未登录"
+            )
+
+            targetUserId.isNotEmpty() && targetUserId != currentUserId -> sendHookReadyResult(
+                ctx,
+                targetUserId,
+                ready = false,
+                message = "当前支付宝账号与好友中心账号不一致: target=$targetUserId, current=$currentUserId",
+                currentUserId = currentUserId
+            )
+
+            ApplicationHookConstants.shouldBlockRpc() -> sendHookReadyResult(
+                ctx,
+                targetUserId.ifBlank { currentUserId },
+                ready = false,
+                message = "目标应用 RPC 当前处于离线拦截状态",
+                currentUserId = currentUserId
+            )
+
+            ApplicationHook.rpcBridge == null -> sendHookReadyResult(
+                ctx,
+                targetUserId.ifBlank { currentUserId },
+                ready = false,
+                message = "目标应用 RpcBridge 尚未就绪",
+                currentUserId = currentUserId
+            )
+
+            else -> sendHookReadyResult(
+                ctx,
+                targetUserId.ifBlank { currentUserId },
+                ready = true,
+                message = "目标应用已就绪",
+                currentUserId = currentUserId
+            )
+        }
+    }
+
+    private fun sendHookReadyResult(
+        context: Context?,
+        userId: String,
+        ready: Boolean,
+        message: String,
+        currentUserId: String = ""
+    ) {
+        val ctx = context ?: ApplicationHook.appContext ?: return
+        ctx.sendBroadcast(Intent(ApplicationHookConstants.BroadcastActions.HOOK_READY_RESULT).apply {
+            putExtra("userId", userId)
+            putExtra("ready", ready)
+            putExtra("message", message)
+            putExtra("currentUserId", currentUserId)
+            putExtra("timestamp", System.currentTimeMillis())
+        })
+    }
+
+    private fun handleRefreshFriendsBroadcast(context: Context?, intent: Intent) {
+        val ctx = context?.applicationContext ?: context ?: ApplicationHook.appContext
+        val safeIntent = Intent(intent)
+        ApplicationHookConstants.submitEntry("refresh_friends") {
+            val targetUserId = safeIntent.getStringExtra("userId")?.trim().orEmpty()
+            val force = safeIntent.getBooleanExtra("manual", true)
+            val loader = ApplicationHook.classLoader
+            if (loader == null) {
+                sendRefreshFriendsResult(
+                    ctx,
+                    targetUserId,
+                    success = false,
+                    message = "刷新好友失败：Hook classLoader 不可用"
+                )
+                return@submitEntry
+            }
+
+            val currentUserId = HookUtil.getUserId(loader)?.trim().orEmpty()
+            if (currentUserId.isEmpty()) {
+                sendRefreshFriendsResult(
+                    ctx,
+                    targetUserId,
+                    success = false,
+                    message = "刷新好友失败：当前支付宝账号未登录"
+                )
+                return@submitEntry
+            }
+            if (targetUserId.isNotEmpty() && targetUserId != currentUserId) {
+                sendRefreshFriendsResult(
+                    ctx,
+                    targetUserId,
+                    success = false,
+                    message = "忽略非当前账号的好友刷新请求: target=$targetUserId, current=$currentUserId"
+                )
+                return@submitEntry
+            }
+
+            val result = ApplicationHook.refreshFriendsFromAlipayIfNeeded(
+                userId = currentUserId,
+                force = force,
+                source = if (force) "manual_refresh" else "broadcast_refresh"
+            )
+            sendRefreshFriendsResult(
+                ctx,
+                result.userId.ifBlank { currentUserId },
+                success = result.success,
+                message = result.message,
+                profiles = result.profiles,
+                groups = result.groups
+            )
+        }
+    }
+
+    private fun sendRefreshFriendsResult(
+        context: Context?,
+        userId: String,
+        success: Boolean,
+        message: String,
+        profiles: Int = 0,
+        groups: Int = 0
+    ) {
+        val ctx = context ?: ApplicationHook.appContext ?: return
+        ctx.sendBroadcast(Intent(ApplicationHookConstants.BroadcastActions.REFRESH_FRIENDS_RESULT).apply {
+            putExtra("userId", userId)
+            putExtra("success", success)
+            putExtra("message", message)
+            putExtra("profiles", profiles)
+            putExtra("groups", groups)
+            putExtra("timestamp", System.currentTimeMillis())
+        })
+    }
+
+    private fun handleRefreshExchangeOptionsBroadcast(context: Context?, intent: Intent) {
+        val ctx = context?.applicationContext ?: context ?: ApplicationHook.appContext
+        val safeIntent = Intent(intent)
+        execute {
+            val requestId = safeIntent.getStringExtra("requestId").orEmpty()
+            val target = safeIntent.getStringExtra("target").orEmpty()
+            val targetUserId = safeIntent.getStringExtra("userId")?.trim().orEmpty()
+            val result = refreshExchangeOptionsInTarget(target, targetUserId)
+            sendRefreshExchangeOptionsResult(
+                ctx,
+                requestId = requestId,
+                target = target,
+                userId = result.userId.ifBlank { targetUserId },
+                success = result.success,
+                message = result.message
+            )
+        }
+    }
+
+    private data class ExchangeOptionsRefreshResult(
+        val success: Boolean,
+        val message: String,
+        val userId: String = ""
+    )
+
+    private fun refreshExchangeOptionsInTarget(target: String, targetUserId: String): ExchangeOptionsRefreshResult {
+        val loader = ApplicationHook.classLoader
+            ?: return ExchangeOptionsRefreshResult(false, "目标应用 Hook 尚未就绪")
+        val currentUserId = HookUtil.getUserId(loader)?.trim().orEmpty()
+        if (currentUserId.isEmpty()) {
+            return ExchangeOptionsRefreshResult(false, "当前支付宝账号未登录")
+        }
+        if (targetUserId.isNotEmpty() && targetUserId != currentUserId) {
+            return ExchangeOptionsRefreshResult(
+                false,
+                "当前支付宝账号与配置账号不一致: target=$targetUserId, current=$currentUserId",
+                currentUserId
+            )
+        }
+        if (ApplicationHookConstants.shouldBlockRpc()) {
+            return ExchangeOptionsRefreshResult(false, "目标应用 RPC 当前处于离线拦截状态", currentUserId)
+        }
+        if (ApplicationHook.rpcBridge == null) {
+            return ExchangeOptionsRefreshResult(false, "目标应用 RpcBridge 尚未就绪", currentUserId)
+        }
+
+        return try {
+            UserMap.setCurrentUserId(currentUserId)
+            when (target) {
+                ExchangeOptionsRefreshBridge.TARGET_MEMBER_POINT -> {
+                    Model.getModel(AntMember::class.java)?.refreshMemberPointExchangeOptionsForRemote()
+                        ?: return ExchangeOptionsRefreshResult(false, "会员模块未初始化", currentUserId)
+                }
+
+                ExchangeOptionsRefreshBridge.TARGET_BEAN_RIGHT -> {
+                    Model.getModel(AntMember::class.java)?.refreshBeanExchangeRightOptionsForRemote()
+                        ?: return ExchangeOptionsRefreshResult(false, "会员模块未初始化", currentUserId)
+                }
+
+                ExchangeOptionsRefreshBridge.TARGET_FARM_PARADISE -> {
+                    Model.getModel(AntFarm::class.java)?.refreshParadiseCoinExchangeOptionsForRemote()
+                        ?: return ExchangeOptionsRefreshResult(false, "庄园模块未初始化", currentUserId)
+                }
+
+                ExchangeOptionsRefreshBridge.TARGET_SPORTS_ENERGY -> {
+                    Model.getModel(AntSports::class.java)?.refreshSportsEnergyExchangeOptionsForRemote()
+                        ?: return ExchangeOptionsRefreshResult(false, "运动模块未初始化", currentUserId)
+                }
+
+                else -> return ExchangeOptionsRefreshResult(false, "未知兑换列表刷新目标: $target", currentUserId)
+            }
+            ExchangeOptionsRefreshResult(true, "刷新完成: $target", currentUserId)
+        } catch (t: Throwable) {
+            io.github.aoguai.sesameag.util.Log.printStackTrace(TAG, "refreshExchangeOptionsInTarget err:", t)
+            ExchangeOptionsRefreshResult(false, "刷新失败: ${t.message ?: t.javaClass.simpleName}", currentUserId)
+        }
+    }
+
+    private fun sendRefreshExchangeOptionsResult(
+        context: Context?,
+        requestId: String,
+        target: String,
+        userId: String,
+        success: Boolean,
+        message: String
+    ) {
+        val ctx = context ?: ApplicationHook.appContext ?: return
+        ctx.sendBroadcast(Intent(ApplicationHookConstants.BroadcastActions.REFRESH_EXCHANGE_OPTIONS_RESULT).apply {
+            putExtra("requestId", requestId)
+            putExtra("target", target)
+            putExtra("userId", userId)
+            putExtra("success", success)
+            putExtra("message", message)
+            putExtra("timestamp", System.currentTimeMillis())
+        })
     }
 
     private fun handleManualTaskBroadcast(intent: Intent) {
@@ -123,10 +374,7 @@ internal object ApplicationBroadcastDispatcher {
                     val task = CustomTask.valueOf(normalizedTaskName)
                     val extraParams = HashMap<String, Any>()
                     when (task) {
-                        CustomTask.FOREST_WHACK_MOLE -> {
-                            extraParams["whackMoleMode"] = intent.getIntExtra("whackMoleMode", 1)
-                            extraParams["whackMoleGames"] = intent.getIntExtra("whackMoleGames", 5)
-                        }
+                        CustomTask.FOREST_WHACK_MOLE -> Unit
 
                         CustomTask.FOREST_ENERGY_RAIN -> {
                             extraParams["exchangeEnergyRainCard"] = intent.getBooleanExtra("exchangeEnergyRainCard", false)

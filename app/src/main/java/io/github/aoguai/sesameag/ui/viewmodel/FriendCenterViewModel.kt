@@ -1,17 +1,23 @@
 package io.github.aoguai.sesameag.ui.viewmodel
 
+import android.content.Context
+import android.content.Intent
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import io.github.aoguai.sesameag.data.Config
 import io.github.aoguai.sesameag.entity.friend.FriendCenterConfig
 import io.github.aoguai.sesameag.entity.friend.FriendModuleCapability
 import io.github.aoguai.sesameag.entity.friend.FriendGroup
 import io.github.aoguai.sesameag.entity.friend.FriendProfile
 import io.github.aoguai.sesameag.entity.friend.FriendRelation
+import io.github.aoguai.sesameag.hook.ApplicationHookConstants
 import io.github.aoguai.sesameag.util.friend.FriendRepository
 import io.github.aoguai.sesameag.util.maps.UserMap
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import java.util.UUID
 
 enum class FriendCenterFilter {
@@ -60,6 +66,10 @@ data class FriendCenterUiState(
     val stats: FriendCenterStats = FriendCenterStats(),
     val searchQuery: String = "",
     val filter: FriendCenterFilter = FriendCenterFilter.ALL,
+    val refreshAvailable: Boolean = false,
+    val checkingRefreshAvailability: Boolean = false,
+    val refreshing: Boolean = false,
+    val lastRefreshMessage: String = "",
     val message: String = ""
 ) {
     val selectedGroup: FriendGroupUiItem?
@@ -69,6 +79,13 @@ data class FriendCenterUiState(
 class FriendCenterViewModel : ViewModel() {
     private val _uiState = MutableStateFlow(FriendCenterUiState())
     val uiState: StateFlow<FriendCenterUiState> = _uiState.asStateFlow()
+    private var refreshAvailabilityToken: Long = 0L
+    private var showRefreshAvailabilityMessage: Boolean = false
+    private var refreshRequestToken: Long = 0L
+
+    companion object {
+        private const val REFRESH_UNAVAILABLE_MESSAGE = "请先启动支付宝后再刷新好友"
+    }
 
     fun load(userId: String) {
         if (userId.isBlank()) {
@@ -79,7 +96,220 @@ class FriendCenterViewModel : ViewModel() {
         UserMap.load(userId)
         // 以当前账号 friend.json 快照为准，同步时把缺失好友标记为失效，避免长期残留“伪有效”关系。
         FriendRepository.mergeFromUserMap(userId, allowPruneMissing = true)
-        refresh(userId)
+        refresh(
+            userId,
+            refreshAvailable = false,
+            checkingRefreshAvailability = false,
+            lastRefreshMessage = ""
+        )
+    }
+
+    fun requestRefreshAvailability(context: Context, showUnavailableMessage: Boolean = false) {
+        val state = _uiState.value
+        val currentUserId = state.userId.trim()
+        if (currentUserId.isEmpty()) {
+            refreshAvailabilityToken = 0L
+            showRefreshAvailabilityMessage = false
+            _uiState.value = state.copy(
+                refreshAvailable = false,
+                checkingRefreshAvailability = false
+            )
+            return
+        }
+
+        val token = System.currentTimeMillis()
+        refreshAvailabilityToken = token
+        showRefreshAvailabilityMessage = showUnavailableMessage
+        _uiState.value = state.copy(
+            refreshAvailable = false,
+            checkingRefreshAvailability = true
+        )
+
+        try {
+            context.applicationContext.sendBroadcast(Intent(ApplicationHookConstants.BroadcastActions.HOOK_READY).apply {
+                putExtra("userId", currentUserId)
+            })
+        } catch (t: Throwable) {
+            refreshAvailabilityToken = 0L
+            showRefreshAvailabilityMessage = false
+            val errorMessage = "检测目标应用状态失败：${t.message ?: t.javaClass.simpleName}"
+            _uiState.value = _uiState.value.copy(
+                refreshAvailable = false,
+                checkingRefreshAvailability = false,
+                lastRefreshMessage = if (showUnavailableMessage) errorMessage else _uiState.value.lastRefreshMessage,
+                message = if (showUnavailableMessage) errorMessage else _uiState.value.message
+            )
+            return
+        }
+
+        viewModelScope.launch {
+            delay(2_000L)
+            val latest = _uiState.value
+            if (
+                refreshAvailabilityToken != token ||
+                latest.userId != currentUserId ||
+                !latest.checkingRefreshAvailability
+            ) {
+                return@launch
+            }
+            refreshAvailabilityToken = 0L
+            val shouldShowMessage = showRefreshAvailabilityMessage
+            showRefreshAvailabilityMessage = false
+            _uiState.value = latest.copy(
+                refreshAvailable = false,
+                checkingRefreshAvailability = false,
+                lastRefreshMessage = if (shouldShowMessage) REFRESH_UNAVAILABLE_MESSAGE else latest.lastRefreshMessage,
+                message = if (shouldShowMessage) REFRESH_UNAVAILABLE_MESSAGE else latest.message
+            )
+        }
+    }
+
+    @Suppress("UNUSED_PARAMETER")
+    fun handleRefreshAvailabilityResult(
+        resultUserId: String,
+        ready: Boolean,
+        message: String,
+        currentUserId: String,
+        timestamp: Long
+    ) {
+        val state = _uiState.value
+        val pageUserId = state.userId.trim()
+        val normalizedResultUserId = resultUserId.trim()
+        if (pageUserId.isNotEmpty() && normalizedResultUserId.isNotEmpty() && pageUserId != normalizedResultUserId) {
+            return
+        }
+
+        refreshAvailabilityToken = 0L
+        val shouldShowMessage = showRefreshAvailabilityMessage
+        showRefreshAvailabilityMessage = false
+        val normalizedMessage = message.ifBlank {
+            if (ready) "" else REFRESH_UNAVAILABLE_MESSAGE
+        }
+        _uiState.value = state.copy(
+            refreshAvailable = ready,
+            checkingRefreshAvailability = false,
+            lastRefreshMessage = if (!ready && shouldShowMessage) normalizedMessage else state.lastRefreshMessage,
+            message = when {
+                ready && state.message == REFRESH_UNAVAILABLE_MESSAGE -> ""
+                ready -> state.message
+                shouldShowMessage -> normalizedMessage
+                else -> state.message
+            }
+        )
+    }
+
+    fun requestRefreshFromAlipay(context: Context) {
+        val state = _uiState.value
+        val currentUserId = state.userId.trim()
+        if (currentUserId.isEmpty()) {
+            _uiState.value = state.copy(message = "未指定账号，无法刷新好友")
+            return
+        }
+        if (!state.refreshAvailable) {
+            _uiState.value = state.copy(
+                lastRefreshMessage = REFRESH_UNAVAILABLE_MESSAGE,
+                message = REFRESH_UNAVAILABLE_MESSAGE
+            )
+            requestRefreshAvailability(context, showUnavailableMessage = true)
+            return
+        }
+        if (state.refreshing) return
+
+        val token = System.currentTimeMillis()
+        refreshRequestToken = token
+        _uiState.value = state.copy(
+            refreshing = true,
+            lastRefreshMessage = "正在刷新好友...",
+            message = "正在刷新好友..."
+        )
+
+        try {
+            context.applicationContext.sendBroadcast(Intent(ApplicationHookConstants.BroadcastActions.REFRESH_FRIENDS).apply {
+                putExtra("userId", currentUserId)
+                putExtra("manual", true)
+            })
+        } catch (t: Throwable) {
+            refreshRequestToken = 0L
+            _uiState.value = _uiState.value.copy(
+                refreshing = false,
+                lastRefreshMessage = "发送刷新指令失败：${t.message ?: t.javaClass.simpleName}",
+                message = "发送刷新指令失败：${t.message ?: t.javaClass.simpleName}"
+            )
+            return
+        }
+
+        viewModelScope.launch {
+            delay(10_000L)
+            val latest = _uiState.value
+            if (!latest.refreshing || refreshRequestToken != token || latest.userId != currentUserId) {
+                return@launch
+            }
+            refreshRequestToken = 0L
+            UserMap.setCurrentUserId(currentUserId)
+            UserMap.load(currentUserId)
+            FriendRepository.mergeFromUserMap(currentUserId, allowPruneMissing = true)
+            refresh(
+                currentUserId,
+                latest.selectedGroupId,
+                message = "已发送刷新指令，未收到完成回执",
+                refreshing = false,
+                lastRefreshMessage = "已发送刷新指令，未收到完成回执"
+            )
+        }
+    }
+
+    @Suppress("UNUSED_PARAMETER")
+    fun handleRefreshResult(
+        resultUserId: String,
+        success: Boolean,
+        message: String,
+        profiles: Int,
+        groups: Int,
+        timestamp: Long
+    ) {
+        val state = _uiState.value
+        val currentUserId = state.userId.trim()
+        val normalizedResultUserId = resultUserId.trim()
+        if (currentUserId.isNotEmpty() && normalizedResultUserId.isNotEmpty() && currentUserId != normalizedResultUserId) {
+            return
+        }
+
+        val targetUserId = normalizedResultUserId.ifEmpty { currentUserId }
+        if (targetUserId.isEmpty()) {
+            _uiState.value = state.copy(
+                refreshing = false,
+                lastRefreshMessage = message.ifBlank { "刷新好友失败：账号为空" },
+                message = message.ifBlank { "刷新好友失败：账号为空" }
+            )
+            return
+        }
+
+        refreshRequestToken = 0L
+        val normalizedMessage = message.ifBlank {
+            if (success) {
+                "好友刷新完成: profiles=$profiles, groups=$groups"
+            } else {
+                "好友刷新失败"
+            }
+        }
+        if (success) {
+            UserMap.setCurrentUserId(targetUserId)
+            UserMap.load(targetUserId)
+            FriendRepository.mergeFromUserMap(targetUserId, allowPruneMissing = true)
+            refresh(
+                targetUserId,
+                state.selectedGroupId,
+                message = normalizedMessage,
+                refreshing = false,
+                lastRefreshMessage = normalizedMessage
+            )
+        } else {
+            _uiState.value = state.copy(
+                refreshing = false,
+                lastRefreshMessage = normalizedMessage,
+                message = normalizedMessage
+            )
+        }
     }
 
     fun updateSearch(query: String) {
@@ -268,6 +498,10 @@ class FriendCenterViewModel : ViewModel() {
         preferredGroupId: String? = null,
         searchQuery: String = _uiState.value.searchQuery,
         filter: FriendCenterFilter = _uiState.value.filter,
+        refreshAvailable: Boolean = _uiState.value.refreshAvailable,
+        checkingRefreshAvailability: Boolean = _uiState.value.checkingRefreshAvailability,
+        refreshing: Boolean = _uiState.value.refreshing,
+        lastRefreshMessage: String = _uiState.value.lastRefreshMessage,
         message: String = ""
     ) {
         if (userId.isBlank()) return
@@ -277,6 +511,10 @@ class FriendCenterViewModel : ViewModel() {
             config = FriendRepository.current(userId),
             searchQuery = searchQuery,
             filter = filter,
+            refreshAvailable = refreshAvailable,
+            checkingRefreshAvailability = checkingRefreshAvailability,
+            refreshing = refreshing,
+            lastRefreshMessage = lastRefreshMessage,
             message = message
         )
     }
@@ -287,6 +525,10 @@ class FriendCenterViewModel : ViewModel() {
         config: FriendCenterConfig,
         searchQuery: String,
         filter: FriendCenterFilter,
+        refreshAvailable: Boolean = _uiState.value.refreshAvailable,
+        checkingRefreshAvailability: Boolean = _uiState.value.checkingRefreshAvailability,
+        refreshing: Boolean = _uiState.value.refreshing,
+        lastRefreshMessage: String = _uiState.value.lastRefreshMessage,
         message: String = ""
     ): FriendCenterUiState {
         val groupNamesByUser = linkedMapOf<String, MutableList<String>>()
@@ -371,6 +613,10 @@ class FriendCenterViewModel : ViewModel() {
             ),
             searchQuery = searchQuery,
             filter = filter,
+            refreshAvailable = refreshAvailable,
+            checkingRefreshAvailability = checkingRefreshAvailability,
+            refreshing = refreshing,
+            lastRefreshMessage = lastRefreshMessage,
             message = message
         )
     }

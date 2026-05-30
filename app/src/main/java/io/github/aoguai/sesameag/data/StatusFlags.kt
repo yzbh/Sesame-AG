@@ -19,6 +19,8 @@ package io.github.aoguai.sesameag.data
  *
  * 使用约束：
  * - 只有成功闭环或明确业务终态才能落完成/止损标记。
+ * - 完成态/止损态必须通过 Status.setFlagToday() 写入，以继承全局离线后的今日标识保护。
+ * - 计数态只记录进度、次数或触发槽，不应复用为“今日已完成/停止”的闭环标识。
  * - 参数错误、RPC 未验证、抓包不足不应伪装成完成态；需要保留日志上下文或进入待支持/补抓流程。
  * - 新增 flag 时优先使用“模块名::业务名::状态”的值格式；是否保留历史 key 由对应重构策略决定。
  */
@@ -33,6 +35,9 @@ object StatusFlags {
 
     /** 自定义 RPC 定时任务：每日计数前缀 */
     const val FLAG_CUSTOM_RPC_SCHEDULE_COUNT_PREFIX: String = "customRpcSchedule::"
+
+    /** 好友中心：今日已从支付宝侧同步好友快照 */
+    const val FLAG_FRIEND_CENTER_SYNC_TODAY: String = "friendCenter::syncToday"
 
     // ============================================================
     // Neverland（健康岛）
@@ -112,7 +117,7 @@ object StatusFlags {
     /** 今日是否已处理「会员签到」 */
     const val FLAG_ANTMEMBER_MEMBER_SIGN_DONE: String = "AntMember::memberSignDone"
 
-    /** 今日会员任务已判定无需继续刷新（列表为空/仅剩黑名单/仅剩暂不支持任务） */
+    /** 今日会员任务已处理到无需继续刷新 */
     const val FLAG_ANTMEMBER_MEMBER_TASK_EMPTY_TODAY: String = "AntMember::memberTaskEmptyToday"
 
     /** 今日会员任务因风控/离线止损，不再继续刷新 */
@@ -140,6 +145,10 @@ object StatusFlags {
     /** 芝麻信用：今日是否已处理全部可执行任务 */
     const val FLAG_SESAME_DO_ALL_AVAILABLE_TASK: String = "AntSesameCredit::doAllAvailableSesameTask"
 
+    /** 芝麻树：今日任务奖励已尝试领取，等待服务端刷新确认 */
+    const val FLAG_SESAME_ZHIMA_TREE_TASK_HANDLED_TODAY: String =
+        "AntSesameCredit::zhimaTreeTaskHandledToday"
+
     /** 芝麻信用：当日加入任务次数已达上限 */
     const val FLAG_SESAME_JOIN_LIMIT_REACHED: String = "AntSesameCredit::sesameJoinLimitReached"
 
@@ -166,6 +175,9 @@ object StatusFlags {
 
     /** 商家服务：每日签到 */
     const val FLAG_ANTMEMBER_MERCHANT_SIGN_DONE: String = "AntMember::merchantSignDone"
+
+    /** 商家服务：今日积分任务是否已处理 */
+    const val FLAG_ANTMEMBER_MERCHANT_MORE_TASK_DONE: String = "AntMember::merchantMoreTaskDone"
 
     /** 商家服务：开门打卡签到（06:00-12:00） */
     const val FLAG_ANTMEMBER_MERCHANT_KMDK_SIGNIN_DONE: String = "AntMember::merchantKmdkSignInDone"
@@ -197,6 +209,9 @@ object StatusFlags {
 
     /** 今日运动日常任务是否已完成 */
     const val FLAG_ANTSPORTS_DAILY_TASKS_DONE: String = "FLAG_ANTSPORTS_dailyTasks_Done"
+
+    /** 今日运动问答是否已处理 */
+    const val FLAG_ANTSPORTS_MOTION_DAILY_QUIZ_DONE: String = "AntSports::motionDailyQuizDone"
 
     /** 运动签到：今日已处理或已进入业务止损 */
     const val FLAG_ANTSPORTS_CHECK_IN_HANDLED_TODAY: String = "AntSports::checkInHandledToday"

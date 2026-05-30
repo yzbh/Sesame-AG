@@ -1,6 +1,6 @@
 package io.github.aoguai.sesameag.hook
 
-import io.github.aoguai.sesameag.hook.keepalive.SmartSchedulerManager
+import io.github.aoguai.sesameag.hook.keepalive.UnifiedScheduler
 import io.github.aoguai.sesameag.task.ModelTask.Companion.stopAllTask
 import io.github.aoguai.sesameag.util.Log.record
 import io.github.aoguai.sesameag.util.Notify.updateRunningStatus
@@ -9,7 +9,6 @@ internal object ApplicationResumeCoordinator {
     private const val TAG = ApplicationHook.TAG
     private const val AUTH_LIKE_AUTO_RECOVER_GUARD_MS: Long = 1500L
     private const val MODULE_FOREGROUND_RESUME_GUARD_MS: Long = 15_000L
-    private const val AUTH_LIKE_AUTO_RECOVER_GUARD_IGNORE_REOPEN_COUNT: Int = 1
 
     @Volatile
     private var hostAppWentBackground = false
@@ -19,15 +18,6 @@ internal object ApplicationResumeCoordinator {
 
     @Volatile
     private var lastReOpenAppLaunchAtMs: Long = 0L
-
-    @Volatile
-    private var authLikeReopenGuardOfflineEnterAtMs: Long = 0L
-
-    @Volatile
-    private var authLikeReopenGuardCountedReopenAtMs: Long = 0L
-
-    @Volatile
-    private var authLikeReopenGuardReopenCount: Int = 0
 
     fun reset() {
         hostAppWentBackground = false
@@ -93,27 +83,8 @@ internal object ApplicationResumeCoordinator {
                 lastReopenAt > 0L &&
                 (now - lastReopenAt) in 0..AUTH_LIKE_AUTO_RECOVER_GUARD_MS
         if (autoResumeByReopen) {
-            val offlineEnterAtMs = ApplicationHookConstants.lastOfflineEnterAtMs
-            if (authLikeReopenGuardOfflineEnterAtMs != offlineEnterAtMs) {
-                authLikeReopenGuardOfflineEnterAtMs = offlineEnterAtMs
-                authLikeReopenGuardCountedReopenAtMs = 0L
-                authLikeReopenGuardReopenCount = 0
-            }
-
-            if (lastReopenAt != authLikeReopenGuardCountedReopenAtMs) {
-                authLikeReopenGuardCountedReopenAtMs = lastReopenAt
-                authLikeReopenGuardReopenCount++
-            }
-
-            if (authLikeReopenGuardReopenCount <= AUTH_LIKE_AUTO_RECOVER_GUARD_IGNORE_REOPEN_COUNT) {
-                record(
-                    TAG,
-                    "检测到 auth_like 离线，但 $resumeSource 由 reOpenApp 触发(${now - lastReopenAt}ms)，保持离线等待用户完成验证(#$authLikeReopenGuardReopenCount)"
-                )
-                return false
-            }
-
-            record(TAG, "检测到 auth_like 离线，但已多次 reOpenApp(#$authLikeReopenGuardReopenCount)，尝试自动恢复执行")
+            record(TAG, "检测到 auth_like 离线，但 $resumeSource 由 reOpenApp 触发(${now - lastReopenAt}ms)，保持离线等待用户完成验证")
+            return false
         }
 
         val shouldRecover = cooldownExpired || when (reason) {
@@ -128,7 +99,7 @@ internal object ApplicationResumeCoordinator {
 
         record(TAG, "检测到 ${reason ?: "unknown"} 离线状态，尝试在 $resumeSource 退出离线并恢复任务执行")
         ApplicationHookConstants.setOffline(false)
-        SmartSchedulerManager.cancelNamedTask("重新登录")
+        UnifiedScheduler.cancelNamedTask("重新登录")
         ApplicationHook.lastExecTime = 0
 
         val statusMsg = when (reason) {

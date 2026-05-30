@@ -6,7 +6,6 @@ import io.github.aoguai.sesameag.task.TaskStatus
 import io.github.aoguai.sesameag.util.GlobalThreadPools.sleepCompat
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.ResChecker
-import io.github.aoguai.sesameag.util.RpcCache
 import io.github.aoguai.sesameag.util.TaskBlacklist
 import io.github.aoguai.sesameag.util.maps.UserMap
 import org.json.JSONObject
@@ -186,7 +185,6 @@ class ForestChouChouLe {
     }.onFailure { Log.printStackTrace(TAG, "${s.name} 处理异常", it) }
 
     private fun fetchFreshTaskList(s: Scene): JSONObject? {
-        RpcCache.invalidate(RPC_LIST_TASK_OPEN_GREEN)
         return AntForestRpcCall.listTaskopengreen(s.taskCode, SOURCE).toJson()
     }
 
@@ -224,12 +222,15 @@ class ForestChouChouLe {
      * 循环处理任务列表
      */
     private fun processTasksLoop(s: Scene) {
-        repeat(3) { loop ->
-            Log.forest("${s.name} 第 ${loop + 1} 轮任务检查")
-            val tasksResp = fetchFreshTaskList(s) ?: return@repeat
-            if (!tasksResp.check()) return@repeat
+        var loop = 0
+        var unchangedCount = 0
+        while (unchangedCount < 3) {
+            loop++
+            Log.forest("${s.name} 第 $loop 轮任务检查")
+            val tasksResp = fetchFreshTaskList(s) ?: break
+            if (!tasksResp.check()) break
 
-            val taskList = tasksResp.optJSONArray("taskInfoList") ?: return@repeat
+            val taskList = tasksResp.optJSONArray("taskInfoList") ?: break
             var hasChange = false
 
             for (i in 0 until taskList.length()) {
@@ -240,11 +241,14 @@ class ForestChouChouLe {
             }
 
             if (!hasChange) {
-                Log.forest("${s.name} 本轮无任务状态变更, 结束任务循环")
-                return
+                unchangedCount++
+                Log.forest("${s.name} 本轮无任务状态变更, 连续 $unchangedCount / 3")
+            } else {
+                unchangedCount = 0
             }
-            if (loop < 2) sleepCompat(100L)
+            if (unchangedCount < 3) sleepCompat(100L)
         }
+        Log.forest("${s.name} 连续 3 轮无任务状态变更, 结束任务循环")
     }
 
     /**

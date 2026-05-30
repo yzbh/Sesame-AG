@@ -13,7 +13,6 @@ import io.github.aoguai.sesameag.util.GlobalThreadPools
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.RandomUtil
 import io.github.aoguai.sesameag.util.ResChecker
-import io.github.aoguai.sesameag.util.RpcCache
 import io.github.aoguai.sesameag.util.friend.FriendSelectionResolver
 import io.github.aoguai.sesameag.util.maps.UserMap
 import org.json.JSONArray
@@ -23,7 +22,7 @@ import java.util.Objects
 import kotlin.math.abs
 
 data object AntFarmFamily {
-    private const val TAG = "小鸡家庭"
+    private const val TAG = "AntFarmFamily"
     private const val DAILY_DONATE_TASK_ID = "DAILY_DONATE"
 
     /**
@@ -229,7 +228,6 @@ data object AntFarmFamily {
 
     private fun queryDailyDonateTaskAfterPublicDonation(): JSONObject? {
         val taskLogName = "家庭任务🏠每日捐蛋"
-        RpcCache.invalidate("com.alipay.antfarm.listFamilyTask")
         val taskJo = JSONObject(AntFarmRpcCall.listFamilyTask())
         if (!ResChecker.checkRes(TAG, taskJo)) {
             Log.farm("$taskLogName#listFamilyTask 调用失败: ${formatFamilyTaskFailure(taskJo)}")
@@ -1201,6 +1199,7 @@ data object AntFarmFamily {
             )
 
             var currentBalance = 0
+            val purchasedDecorationKeys = LinkedHashSet<String>()
 
             for (label in labelTypes) {
                 var startIndex = 0
@@ -1232,6 +1231,11 @@ data object AntFarmFamily {
                             val skuList = item.optJSONArray("skuModelList")
                             if (skuList != null && skuList.length() > 0) {
                                 val skuId = skuList.getJSONObject(0).getString("skuId")
+                                val exchangeKey = "$spuId|$skuId|$activityId"
+                                if (purchasedDecorationKeys.contains(exchangeKey)) {
+                                    Log.farm("[家庭装扮] 跳过已购买家具: $spuName")
+                                    continue
+                                }
                                 Log.farm("[家庭装扮] 发现未拥有家具: $spuName")
 
                                 val exchangeRes = AntFarmRpcCall.exchangeBenefit(spuId, skuId, activityId)
@@ -1239,6 +1243,7 @@ data object AntFarmFamily {
 
                                 if (ResChecker.checkRes(TAG, exchangeJo)) {
                                     Log.farm("家庭装扮💸#成功购买[$spuName]#消耗[${price/100}装修金]")
+                                    purchasedDecorationKeys.add(exchangeKey)
                                     currentBalance -= price
                                 }
                                 GlobalThreadPools.sleepCompat(2000)

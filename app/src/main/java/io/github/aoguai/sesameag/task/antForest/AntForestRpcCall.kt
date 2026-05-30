@@ -19,6 +19,7 @@ object AntForestRpcCall {
     private const val PROTECT_BUBBLE_VERSION = "20230501"
     private const val ENERGY_RAIN_SOURCE = "forest"
     private const val ENERGY_RAIN_VERSION = "20230501"
+    private const val WHACK_MOLE_VERSION = "20230824"
     const val OPEN_GREEN_RIGHTS_SOURCE = "chInfo_ch_appid-60000002"
     internal const val BACK_FROM_ENERGY_RAIN_SOURCE = "backFromEnergyRain"
     private var VERSION = "20250818"
@@ -917,7 +918,7 @@ object AntForestRpcCall {
     fun settlementWhackMole(token: String, moleIdList: List<String>, source: String): String {
         return RequestManager.requestString(
             "alipay.antforest.forest.h5.settlementWhackMole",
-            "[{\"moleIdList\":[${moleIdList.joinToString(",")}],\"settlementScene\":\"NORMAL\",\"source\":\"$source\",\"token\":\"$token\",\"version\":\"$VERSION\"}]"
+            "[{\"moleIdList\":[${moleIdList.joinToString(",")}],\"settlementScene\":\"NORMAL\",\"source\":\"$source\",\"token\":\"$token\",\"version\":\"$WHACK_MOLE_VERSION\"}]"
         )
     }
 
@@ -925,35 +926,8 @@ object AntForestRpcCall {
     fun whackMole(moleId: Long, token: String, source: String): String {
         return RequestManager.requestString(
             "alipay.antforest.forest.h5.whackMole",
-            "[{\"moleId\":$moleId,\"source\":\"$source\",\"token\":\"$token\",\"version\":\"$VERSION\"}]"
+            "[{\"moleId\":$moleId,\"source\":\"$source\",\"token\":\"$token\",\"version\":\"$WHACK_MOLE_VERSION\"}]"
         )
-    }
-
-    @JvmStatic
-    fun oldwhackMole(moleId: Long, token: String, source: String): String {
-        return whackMole(moleId, token, source)
-    }
-
-    @JvmStatic
-    fun oldstartWhackMole(source: String): String {
-        return startWhackMole(source)
-    }
-
-    @JvmStatic
-    fun oldsettlementWhackMole(token: String, moleIdList: List<String>, source: String): String {
-        return settlementWhackMole(token, moleIdList, source)
-    }
-
-    @JvmStatic
-    fun startWhackMole(): String {
-        return startWhackMole("senlinguangchangdadishu")
-    }
-
-    @JvmStatic
-    @Throws(JSONException::class)
-    fun settlementWhackMole(token: String): String {
-        val moleIdList = (1..20).map { it.toString() }
-        return settlementWhackMole(token, moleIdList, "senlinguangchangdadishu")
     }
 
     @JvmStatic

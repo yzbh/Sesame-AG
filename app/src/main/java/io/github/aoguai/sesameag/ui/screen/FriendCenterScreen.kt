@@ -1,5 +1,9 @@
 package io.github.aoguai.sesameag.ui.screen
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -26,6 +30,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -53,14 +58,17 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.aoguai.sesameag.entity.friend.FriendRelation
+import io.github.aoguai.sesameag.hook.ApplicationHookConstants
 import io.github.aoguai.sesameag.ui.viewmodel.FriendCenterFilter
 import io.github.aoguai.sesameag.ui.viewmodel.FriendCenterViewModel
 import io.github.aoguai.sesameag.ui.viewmodel.FriendGroupUiItem
@@ -76,6 +84,7 @@ fun FriendCenterScreen(
     viewModel: FriendCenterViewModel = viewModel()
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var newGroupName by remember { mutableStateOf("") }
     var editingGroupId by remember { mutableStateOf<String?>(null) }
@@ -94,17 +103,57 @@ fun FriendCenterScreen(
 
     LaunchedEffect(userId) {
         viewModel.load(userId)
+        viewModel.requestRefreshAvailability(context)
     }
 
     DisposableEffect(lifecycleOwner, userId) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 viewModel.load(userId)
+                viewModel.requestRefreshAvailability(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    DisposableEffect(context, userId) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    ApplicationHookConstants.BroadcastActions.HOOK_READY_RESULT -> viewModel.handleRefreshAvailabilityResult(
+                        resultUserId = intent.getStringExtra("userId").orEmpty(),
+                        ready = intent.getBooleanExtra("ready", false),
+                        message = intent.getStringExtra("message").orEmpty(),
+                        currentUserId = intent.getStringExtra("currentUserId").orEmpty(),
+                        timestamp = intent.getLongExtra("timestamp", 0L)
+                    )
+
+                    ApplicationHookConstants.BroadcastActions.REFRESH_FRIENDS_RESULT -> viewModel.handleRefreshResult(
+                        resultUserId = intent.getStringExtra("userId").orEmpty(),
+                        success = intent.getBooleanExtra("success", false),
+                        message = intent.getStringExtra("message").orEmpty(),
+                        profiles = intent.getIntExtra("profiles", 0),
+                        groups = intent.getIntExtra("groups", 0),
+                        timestamp = intent.getLongExtra("timestamp", 0L)
+                    )
+                }
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(ApplicationHookConstants.BroadcastActions.HOOK_READY_RESULT)
+            addAction(ApplicationHookConstants.BroadcastActions.REFRESH_FRIENDS_RESULT)
+        }
+        ContextCompat.registerReceiver(
+            context,
+            receiver,
+            filter,
+            ContextCompat.RECEIVER_EXPORTED
+        )
+        onDispose {
+            runCatching { context.unregisterReceiver(receiver) }
         }
     }
 
@@ -161,6 +210,22 @@ fun FriendCenterScreen(
                             batchSelectedUserIds = emptySet()
                         }) {
                             Text("取消")
+                        }
+                    } else {
+                        val refreshEnabled = state.refreshAvailable &&
+                            !state.checkingRefreshAvailability &&
+                            !state.refreshing
+                        val refreshDescription = when {
+                            state.refreshing -> "正在刷新好友"
+                            state.checkingRefreshAvailability -> "正在检测目标应用"
+                            !state.refreshAvailable -> "请先启动支付宝后再刷新好友"
+                            else -> "刷新好友"
+                        }
+                        IconButton(
+                            onClick = { viewModel.requestRefreshFromAlipay(context) },
+                            enabled = refreshEnabled
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = refreshDescription)
                         }
                     }
                 }

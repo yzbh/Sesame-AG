@@ -1,10 +1,11 @@
 package io.github.aoguai.sesameag.task
 
 import android.annotation.SuppressLint
-import io.github.aoguai.sesameag.hook.keepalive.SmartSchedulerManager
+import io.github.aoguai.sesameag.hook.keepalive.UnifiedScheduler
 import io.github.aoguai.sesameag.model.BaseModel
 import io.github.aoguai.sesameag.model.Model
 import io.github.aoguai.sesameag.model.ModelFields
+import io.github.aoguai.sesameag.model.ModelGroup
 import io.github.aoguai.sesameag.model.ModelType
 import io.github.aoguai.sesameag.task.antForest.AntForest
 import io.github.aoguai.sesameag.util.Log
@@ -47,6 +48,12 @@ abstract class ModelTask : Model() {
     
     /** 执行互斥锁，防止重复执行 */
     private val executionMutex = Mutex()
+
+    /** 当前已提交的启动 Job，覆盖“等待互斥锁”和“正在运行”两个阶段 */
+    @Volatile
+    private var currentStartJob: Job? = null
+
+    private val startJobLock = Any()
     
     /** 任务运行次数计数器 */
     var runCents: Int = 0
@@ -100,6 +107,34 @@ abstract class ModelTask : Model() {
     /** 获取任务字段配置，子类必须实现  */
     abstract override fun getFields(): ModelFields?
 
+    private fun recordModuleCheckMessage(msg: String) {
+        when (getName()) {
+            "蚂蚁森林", "蚂蚁森林合种", "保护地", "生态保护" -> Log.forest(msg)
+            "农场", "芭芭农场" -> Log.orchard(msg)
+            "蚂蚁庄园" -> Log.farm(msg)
+            "新村", "蚂蚁新村" -> Log.stall(msg)
+            "海洋", "神奇海洋" -> Log.ocean(msg)
+            "神奇物种" -> Log.dodo(msg)
+            "会员" -> Log.member(msg)
+            "福气鱼池" -> Log.fishpond(msg)
+            "运动" -> Log.sports(msg)
+            "绿色经营" -> Log.greenFinance(msg)
+            "芝麻信用" -> Log.sesame(msg)
+            else -> when (getGroup()) {
+                ModelGroup.FOREST -> Log.forest(msg)
+                ModelGroup.ORCHARD -> Log.orchard(msg)
+                ModelGroup.FARM -> Log.farm(msg)
+                ModelGroup.STALL -> Log.stall(msg)
+                ModelGroup.DODO -> Log.dodo(msg)
+                ModelGroup.FISHPOND -> Log.fishpond(msg)
+                ModelGroup.SPORTS -> Log.sports(msg)
+                ModelGroup.MEMBER -> Log.member(msg)
+                ModelGroup.SESAME_CREDIT -> Log.sesame(msg)
+                else -> Log.record(getName() ?: "Task", msg)
+            }
+        }
+    }
+
     /** 检查任务是否可以执行  */
     open fun check(): Boolean {
         TaskCommon.update()
@@ -109,7 +144,7 @@ abstract class ModelTask : Model() {
             val antForest = getModel(AntForest::class.java)
             if (antForest != null && antForest.isEnable()) {
                 if (TaskCommon.IS_ENERGY_TIME) {
-                    Log.record(getName() ?: "Task", "⏸ 当前为只收能量时间【${BaseModel.energyTime.value}】，停止执行${getName()}任务！")
+                    recordModuleCheckMessage("⏸ 当前为只收能量时间【${BaseModel.energyTime.value}】，停止执行${getName()}任务！")
                     return false
                 }
             }
@@ -117,7 +152,7 @@ abstract class ModelTask : Model() {
 
         // 模块休眠检查
         if (TaskCommon.IS_MODULE_SLEEP_TIME) {
-            Log.record(getName() ?: "Task", "💤 模块休眠时间【${BaseModel.modelSleepTime.value}】停止执行${getName()}任务！")
+            recordModuleCheckMessage("💤 模块休眠时间【${BaseModel.modelSleepTime.value}】停止执行${getName()}任务！")
             return false
         }
         return true
@@ -233,37 +268,56 @@ abstract class ModelTask : Model() {
         rounds: Int = 2
     ): Job {
         ensureTaskScope()
-        
-        return taskScope!!.launch {
-            executionMutex.withLock {
-                if (isRunning && !force) {
-                    Log.record(TAG, "任务 ${getName()} 正在运行，跳过启动")
-                    return@withLock
-                }
-                if (isRunning && force) {
-                    Log.record(TAG, "强制重启任务 ${getName()}")
-                    stopTask()
-                }
-                if (!isEnable() || !check()) {
-                    Log.record(TAG, "任务 ${getName()} 不满足执行条件")
-                    return@withLock
-                }
-                try {
-                    isRunning = true
-                    addRunCents()
-                    updateRunningStatus("${getName()?.ifBlank { "任务" } ?: "任务"} 运行中")
-                    executeMultiRoundTask(rounds)
-                } catch (_: CancellationException) {
-                    // 协程取消属于正常控制流程（如停止任务/切换用户），不视为错误
-                    Log.record(TAG, "任务被取消: ${getName()}")
-                } catch (e: Exception) {
-                    Log.printStackTrace("startTask err: ${getName()}", e)
-                } finally {
-                    isRunning = false
-                    updateRunningNextExec(-1)
+
+        val startJob = synchronized(startJobLock) {
+            val existingJob = currentStartJob
+            if (!force && existingJob != null && !existingJob.isCompleted) {
+                Log.record(TAG, "任务 ${getName()} 正在运行或等待启动，跳过重复启动")
+                existingJob
+            } else {
+                taskScope!!.launch(start = CoroutineStart.LAZY) {
+                    executionMutex.withLock {
+                        if (isRunning && !force) {
+                            Log.record(TAG, "任务 ${getName()} 正在运行，跳过启动")
+                            return@withLock
+                        }
+                        if (isRunning && force) {
+                            Log.record(TAG, "强制重启任务 ${getName()}")
+                            stopTask()
+                        }
+                        if (!isEnable() || !check()) {
+                            Log.record(TAG, "任务 ${getName()} 不满足执行条件")
+                            return@withLock
+                        }
+                        try {
+                            isRunning = true
+                            addRunCents()
+                            updateRunningStatus("${getName()?.ifBlank { "任务" } ?: "任务"} 运行中")
+                            executeMultiRoundTask(rounds)
+                        } catch (_: CancellationException) {
+                            // 协程取消属于正常控制流程（如停止任务/切换用户），不视为错误
+                            Log.record(TAG, "任务被取消: ${getName()}")
+                        } catch (e: Exception) {
+                            Log.printStackTrace("startTask err: ${getName()}", e)
+                        } finally {
+                            isRunning = false
+                            updateRunningNextExec(-1)
+                        }
+                    }
+                }.also { job ->
+                    currentStartJob = job
+                    job.invokeOnCompletion {
+                        synchronized(startJobLock) {
+                            if (currentStartJob === job) {
+                                currentStartJob = null
+                            }
+                        }
+                    }
                 }
             }
         }
+        startJob.start()
+        return startJob
     }
 
     /**
@@ -400,8 +454,7 @@ abstract class ModelTask : Model() {
         private val suspendRunnable: (suspend () -> Unit)? = null,
         val execTime: Long = 0L,
         // 任务结束时的回调（isSuccess 代表是否正常执行完）
-        var onCompleted: ((isSuccess: Boolean) -> Unit)? = null,
-        var useSmartScheduler: Boolean = true
+        var onCompleted: ((isSuccess: Boolean) -> Unit)? = null
     ) {
         var modelTask: ModelTask? = null
         
@@ -413,7 +466,7 @@ abstract class ModelTask : Model() {
         var isCancelled: Boolean = false
             private set
 
-        /** 外部调度器ID (SmartSchedulerManager) */
+        /** 外部调度器ID */
         private var schedulerId: Int = -1
 
         companion object {
@@ -470,12 +523,8 @@ abstract class ModelTask : Model() {
                     waitingTasks[id] = this
                     isCounted = true
 
-                    // 程序计时模式下，注册一个空调度任务作为保活；系统计时模式只保留普通 delay 等待
-                    val shouldUseProgramTimer =
-                        useSmartScheduler && BaseModel.timedTaskModel.value == BaseModel.TimedTaskModel.PROGRAM
-                    if (shouldUseProgramTimer) {
-                        schedulerId = SmartSchedulerManager.schedule(delayTime, "WakeLock:$id") {}
-                    }
+                    // 程序计时模式下注册空调度任务作为保活；系统计时模式只保留普通 delay 等待。
+                    schedulerId = UnifiedScheduler.scheduleKeepAlive(delayTime, "WakeLock:$id")
 
                     delay(delayTime)
 
@@ -518,7 +567,7 @@ abstract class ModelTask : Model() {
                     waitingTasks.remove(id, this)
                 }
                 if (schedulerId != -1) {
-                    SmartSchedulerManager.cancelTask(schedulerId)
+                    UnifiedScheduler.cancelTask(schedulerId)
                     schedulerId = -1
                 }
                 // 仅在成功执行完或明确被取消时回调，失败时不提示“已取消”
@@ -562,7 +611,7 @@ abstract class ModelTask : Model() {
             job?.cancel()
             // 如果存在外部调度任务，一并取消
             if (schedulerId != -1) {
-                SmartSchedulerManager.cancelTask(schedulerId)
+                UnifiedScheduler.cancelTask(schedulerId)
                 schedulerId = -1
             }
         }

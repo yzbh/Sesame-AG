@@ -1,7 +1,6 @@
 package io.github.aoguai.sesameag.task.antSesameCredit
 
 import io.github.aoguai.sesameag.hook.RequestManager
-import io.github.aoguai.sesameag.util.RpcCache
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -18,6 +17,10 @@ object AntSesameCreditRpcCall {
         "com.antgroup.zmxy.zmcustprod.biz.rpc.home.creditaccumulate.api.CreditAccumulateRpcManager.queryCreditFeedback"
     private const val METHOD_COLLECT_CREDIT_FEEDBACK =
         "com.antgroup.zmxy.zmcustprod.biz.rpc.home.creditaccumulate.api.CreditAccumulateRpcManager.collectCreditFeedback"
+    private const val METHOD_QUERY_LAST_OPERATE_TASK =
+        "com.antgroup.zmxy.zmmemberop.biz.rpc.creditaccumulate.CreditAccumulateStrategyRpcManager.queryLastOperateTask"
+    private const val METHOD_ALCHEMY_QUERY_HOME =
+        "com.antgroup.zmxy.zmmemberop.biz.rpc.AlchemyRpcManager.queryHome"
 
     internal fun isRpcSuccess(raw: String): Boolean {
         return try {
@@ -43,12 +46,6 @@ object AntSesameCreditRpcCall {
         }
     }
 
-    private fun invalidateCreditAccumulateTaskListCacheIfSuccess(raw: String) {
-        if (isRpcSuccess(raw)) {
-            RpcCache.invalidate(METHOD_CREDIT_ACCUMULATE_QUERY_LIST_V3)
-        }
-    }
-
     @JvmStatic
     fun taskFinish(bizId: String, includeExtendInfo: Boolean = false): String {
         val args = JSONObject().apply {
@@ -61,7 +58,6 @@ object AntSesameCreditRpcCall {
             "com.alipay.adtask.biz.mobilegw.service.task.finish",
             JSONArray().put(args).toString()
         )
-        invalidateCreditAccumulateTaskListCacheIfSuccess(resp)
         return resp
     }
 
@@ -134,7 +130,6 @@ object AntSesameCreditRpcCall {
             "com.antgroup.zmxy.zmmemberop.biz.rpc.promise.PromiseRpcManager.joinActivity",
             JSONArray().put(args).toString()
         )
-        invalidateCreditAccumulateTaskListCacheIfSuccess(resp)
         return resp
     }
 
@@ -166,7 +161,6 @@ object AntSesameCreditRpcCall {
             JSONArray().put(args).toString(),
             "zmmemberop", "taskFeedback", "CreditAccumulateStrategyRpcManager"
         )
-        invalidateCreditAccumulateTaskListCacheIfSuccess(resp)
         return resp
     }
 
@@ -179,7 +173,6 @@ object AntSesameCreditRpcCall {
             "com.antgroup.zmxy.zmmemberop.biz.rpc.promise.PromiseRpcManager.pushActivity",
             """[{"recordId":"$recordId"}]"""
         )
-        invalidateCreditAccumulateTaskListCacheIfSuccess(resp)
         return resp
     }
 
@@ -189,7 +182,6 @@ object AntSesameCreditRpcCall {
             "com.antgroup.zmxy.zmmemberop.biz.rpc.promise.PromiseRpcManager.adRewardLjcs",
             """[{"adTaskBizId":"$adTaskBizId"}]"""
         )
-        invalidateCreditAccumulateTaskListCacheIfSuccess(resp)
         return resp
     }
 
@@ -213,9 +205,6 @@ object AntSesameCreditRpcCall {
             METHOD_COLLECT_CREDIT_FEEDBACK,
             """[{"collectAll":true,"status":"UNCLAIMED"}]"""
         )
-        if (isRpcSuccess(resp)) {
-            RpcCache.invalidate(METHOD_QUERY_CREDIT_FEEDBACK)
-        }
         return resp
     }
 
@@ -230,9 +219,6 @@ object AntSesameCreditRpcCall {
             METHOD_COLLECT_CREDIT_FEEDBACK,
             """[{"collectAll":false,"creditFeedbackId":"$creditFeedbackId","status":"UNCLAIMED"}]"""
         )
-        if (isRpcSuccess(resp)) {
-            RpcCache.invalidate(METHOD_QUERY_CREDIT_FEEDBACK)
-        }
         return resp
     }
 
@@ -253,7 +239,7 @@ object AntSesameCreditRpcCall {
     @JvmStatic
     fun queryLastOperateTask(version: String = SESAME_TASK_VERSION): String {
         return RequestManager.requestString(
-            "com.antgroup.zmxy.zmmemberop.biz.rpc.creditaccumulate.CreditAccumulateStrategyRpcManager.queryLastOperateTask",
+            METHOD_QUERY_LAST_OPERATE_TASK,
             """[{"version":"$version"}]"""
         )
     }
@@ -269,11 +255,30 @@ object AntSesameCreditRpcCall {
         )
     }
 
-    fun queryExchangeList(page: Int, pageSize: Int): String {
-        val args =
-            """[{"currentPage":$page,"formDelivery":"false","pageSize":$pageSize,"privilegeSource":"","privilegeTab":"","tabList":[]}]"""
+    fun queryExchangeList(page: Int, pageSize: Int, tab: String? = null): String {
+        val tabList = JSONArray()
+        if (!tab.isNullOrBlank()) {
+            tabList.put(tab)
+        }
+        val args = JSONArray().put(JSONObject().apply {
+            put("currentPage", page)
+            put("formDelivery", "true")
+            put("pageSize", pageSize)
+            put("privilegeSource", "")
+            put("privilegeTab", "")
+            put("tabList", tabList)
+        }).toString()
         return RequestManager.requestString(
             "com.antgroup.zmxy.zmmemberop.biz.rpc.award.AwardRpcManager.queryListV2",
+            args
+        )
+    }
+
+    @JvmStatic
+    fun queryAwardDetail(templateId: String): String {
+        val args = """[{"awardTemplateId":"$templateId"}]"""
+        return RequestManager.requestString(
+            "com.antgroup.zmxy.zmmemberop.biz.rpc.award.AwardRpcManager.queryDetail",
             args
         )
     }
@@ -283,6 +288,15 @@ object AntSesameCreditRpcCall {
         val args = """[{"awardTemplateId":"$templateId"}]"""
         return RequestManager.requestString(
             "com.antgroup.zmxy.zmmemberop.biz.rpc.award.AwardRpcManager.obtainAward",
+            args
+        )
+    }
+
+    @JvmStatic
+    fun queryMyAwardDetail(awardId: String): String {
+        val args = """[{"awardId":"$awardId"}]"""
+        return RequestManager.requestString(
+            "com.antgroup.zmxy.zmmemberop.biz.rpc.award.AwardRpcManager.queryMyAwardDetail",
             args
         )
     }
@@ -511,7 +525,7 @@ object AntSesameCreditRpcCall {
             @JvmStatic
             fun alchemyQueryHome(): String {
                 return RequestManager.requestString(
-                    "com.antgroup.zmxy.zmmemberop.biz.rpc.AlchemyRpcManager.queryHome",
+                    METHOD_ALCHEMY_QUERY_HOME,
                     "[{}]"
                 )
             }

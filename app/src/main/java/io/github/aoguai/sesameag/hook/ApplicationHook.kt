@@ -22,6 +22,7 @@ import io.github.aoguai.sesameag.data.General
 import io.github.aoguai.sesameag.data.Status
 import io.github.aoguai.sesameag.data.Status.Companion.load
 import io.github.aoguai.sesameag.data.Status.Companion.save
+import io.github.aoguai.sesameag.data.StatusFlags
 import io.github.aoguai.sesameag.entity.AlipayVersion
 import io.github.aoguai.sesameag.hook.Toast.show
 import io.github.aoguai.sesameag.hook.TokenHooker.start
@@ -30,9 +31,7 @@ import io.github.aoguai.sesameag.hook.internal.AlipayMiniMarkHelper
 import io.github.aoguai.sesameag.hook.internal.LocationHelper
 import io.github.aoguai.sesameag.hook.internal.AuthCodeHelper
 import io.github.aoguai.sesameag.hook.internal.SecurityBodyHelper
-import io.github.aoguai.sesameag.hook.keepalive.SmartSchedulerManager
-import io.github.aoguai.sesameag.hook.keepalive.SmartSchedulerManager.cleanup
-import io.github.aoguai.sesameag.hook.keepalive.SmartSchedulerManager.schedule
+import io.github.aoguai.sesameag.hook.keepalive.UnifiedScheduler
 import io.github.aoguai.sesameag.hook.rpc.bridge.NewRpcBridge
 import io.github.aoguai.sesameag.hook.rpc.bridge.OldRpcBridge
 import io.github.aoguai.sesameag.hook.rpc.bridge.RpcBridge
@@ -70,6 +69,7 @@ import io.github.aoguai.sesameag.util.TimeTriggerEvaluator
 import io.github.aoguai.sesameag.util.TimeTriggerParser
 import io.github.aoguai.sesameag.util.TimeUtil
 import io.github.aoguai.sesameag.util.WorkflowRootGuard
+import io.github.aoguai.sesameag.util.friend.FriendRepository
 import io.github.aoguai.sesameag.util.maps.UserMap
 import io.github.aoguai.sesameag.util.maps.UserMap.currentUid
 import io.github.libxposed.api.XposedInterface
@@ -244,7 +244,7 @@ class ApplicationHook {
                                     show("用户已切换")
                                     return@submitEntry
                                 }
-                                HookUtil.hookUser(classLoader!!)
+                                refreshFriendsFromAlipayIfNeeded(targetUid, force = false, source = "launcher_onResume")
                             }
 
                             val recoveredFromOffline = ApplicationResumeCoordinator.tryRecoverOffline("onResume")
@@ -457,6 +457,52 @@ class ApplicationHook {
 
         internal fun ensureLegalAcceptedForWorkflow(): Boolean = ensureLegalAcceptanceForWorkflow()
 
+        internal fun refreshFriendsFromAlipayIfNeeded(
+            userId: String,
+            force: Boolean,
+            source: String
+        ): HookUtil.FriendRefreshResult {
+            val safeUserId = userId.trim()
+            if (safeUserId.isEmpty()) {
+                return HookUtil.FriendRefreshResult(success = false, message = "刷新好友失败：账号为空")
+            }
+            val loader = classLoader ?: return HookUtil.FriendRefreshResult(
+                success = false,
+                userId = safeUserId,
+                message = "刷新好友失败：Hook classLoader 不可用"
+            )
+
+            UserMap.setCurrentUserId(safeUserId)
+            runCatching { UserMap.load(safeUserId) }.onFailure {
+                Log.printStackTrace(TAG, "刷新好友前加载本地好友快照失败", it)
+            }
+            runCatching { load(safeUserId, false) }.onFailure {
+                Log.printStackTrace(TAG, "刷新好友前加载每日状态失败", it)
+            }
+
+            if (!force && Status.hasFlagToday(StatusFlags.FLAG_FRIEND_CENTER_SYNC_TODAY)) {
+                val config = FriendRepository.current(safeUserId)
+                val message = "好友中心今日已刷新，跳过自动同步[$source]"
+                record(TAG, message)
+                return HookUtil.FriendRefreshResult(
+                    success = true,
+                    userId = safeUserId,
+                    message = message,
+                    profiles = config.profiles.size,
+                    groups = config.groups.size
+                )
+            }
+
+            val result = HookUtil.hookUser(loader)
+            if (result.success) {
+                Status.setFlagToday(StatusFlags.FLAG_FRIEND_CENTER_SYNC_TODAY)
+                record(TAG, "好友中心刷新完成[$source]: ${result.message}")
+            } else {
+                record(TAG, "好友中心刷新未完成[$source]: ${result.message}")
+            }
+            return result
+        }
+
         @Volatile
         var rpcBridge: RpcBridge? = null
         private val rpcBridgeLock = Any()
@@ -512,7 +558,7 @@ class ApplicationHook {
                         record(TAG, "⚠️ 间隔过短，跳过")
                         // 间隔保护仅用于防抖，重试应尽快（补足到 2s），而不是跟随执行间隔（如 50min）
                         val retryDelayMs = (2000L - elapsedSinceLastExec).coerceAtLeast(200L)
-                        schedule(retryDelayMs, "间隔重试") {
+                        UnifiedScheduler.scheduleLongDelay(retryDelayMs, "间隔重试") {
                             ApplicationHookEntry.onIntervalRetry()
                         }
                         return@withContext
@@ -542,7 +588,7 @@ class ApplicationHook {
         // --- 辅助方法 ---
         private fun ensureScheduler() {
             if (appContext != null) {
-                SmartSchedulerManager.initialize(appContext!!)
+                UnifiedScheduler.initialize(appContext!!)
             }
         }
 
@@ -555,7 +601,7 @@ class ApplicationHook {
         }
 
 
-        fun scheduleNextExecutionInternal(lastTime: Long) {
+        fun scheduleNextExecutionInternal(baseTime: Long) {
             try {
                 checkInactiveTime()
                 val checkInterval = checkInterval.value ?: 0
@@ -565,20 +611,20 @@ class ApplicationHook {
                 if (execScheduleField.isDisabled()) {
                     record(TAG, "定时执行已关闭，保留轮询间隔调度")
                 } else {
-                    val intervalTargetTime = lastTime + checkInterval.toLong()
+                    val intervalTargetTime = baseTime + checkInterval.toLong()
                     val nextPointAt = TimeTriggerEvaluator.nextCheckpointAt(
                         execScheduleField.getTriggerSpec(),
-                        lastTime
+                        baseTime
                     )
                     if (nextPointAt != null && nextPointAt < intervalTargetTime) {
                         record(TAG, "设置定时执行:${TimeUtil.getCommonDate(nextPointAt)}")
                         targetTime = nextPointAt
-                        delayMillis = targetTime - lastTime
+                        delayMillis = targetTime - baseTime
                     }
                 }
-                nextExecutionTime = if (targetTime > 0) targetTime else (lastTime + delayMillis)
+                nextExecutionTime = if (targetTime > 0) targetTime else (baseTime + delayMillis)
                 ensureScheduler()
-                schedule(delayMillis, "轮询任务") {
+                UnifiedScheduler.scheduleLongDelay(delayMillis, "轮询任务") {
                     ApplicationHookEntry.onPollAlarm()
                 }
             } catch (e: Exception) {
@@ -631,7 +677,9 @@ class ApplicationHook {
                     return false
                 }
 
-                HookUtil.hookUser(classLoader!!)
+                UserMap.setCurrentUserId(userId)
+                load(userId)
+                refreshFriendsFromAlipayIfNeeded(userId, force = false, source = reason)
                 record(TAG, "Sesame-AG 开始初始化...")
                 if (!ensureRootAccessForWorkflow(reason)) {
                     return false
@@ -675,7 +723,6 @@ class ApplicationHook {
                 checkBatteryPermission()
 
                 Model.bootAllModel(classLoader)
-                load(userId)
                 updateDay()
 
                 val successMsg = "Loaded SesameAG " + BuildConfig.VERSION_NAME + "✨"
@@ -730,7 +777,7 @@ class ApplicationHook {
                     UserMap.unload()
                 }
 
-                cleanup()
+                UnifiedScheduler.cleanup()
 
                 // 注销广播接收器
                 unregisterBroadcastReceiver(appContext)
@@ -862,7 +909,7 @@ class ApplicationHook {
 
         fun reOpenApp() {
             ensureScheduler()
-            schedule(20000L, "重新登录") {
+            UnifiedScheduler.scheduleLongDelay(20000L, "重新登录") {
                 try {
                     ApplicationResumeCoordinator.recordReOpenAppLaunch()
                     val intent = Intent(Intent.ACTION_VIEW)
@@ -882,8 +929,8 @@ class ApplicationHook {
 
             val wakeField = wakenAtTimeList
             if (wakeField.isDisabled()) {
-                SmartSchedulerManager.cancelNamedTask("每日0点任务")
-                SmartSchedulerManager.cancelNamedTask("自定义唤醒任务")
+                UnifiedScheduler.cancelNamedTask("每日0点任务")
+                UnifiedScheduler.cancelNamedTask("自定义唤醒任务")
                 return
             }
 
@@ -894,7 +941,7 @@ class ApplicationHook {
             val delayToMidnight = calendar.getTimeInMillis() - System.currentTimeMillis()
 
                 if (delayToMidnight > 0) {
-                    schedule(delayToMidnight, "每日0点任务") {
+                    UnifiedScheduler.scheduleLongDelay(delayToMidnight, "每日0点任务") {
                         record(TAG, "⏰ 0点任务触发")
                         updateDay()
                         ApplicationHookEntry.onWakeupMidnight()
@@ -903,7 +950,7 @@ class ApplicationHook {
                 }
 
             // 2. 下一次自定义唤醒（必要时跨日）
-            SmartSchedulerManager.cancelNamedTask("自定义唤醒任务")
+            UnifiedScheduler.cancelNamedTask("自定义唤醒任务")
             val nextWakeAt = wakeField.nextPointAt() ?: return
             val now = System.currentTimeMillis()
             val delay = nextWakeAt - now
@@ -917,7 +964,7 @@ class ApplicationHook {
                 secondOfDay,
                 useSeconds = targetCalendar.get(Calendar.SECOND) != 0
             )
-            schedule(delay, "自定义唤醒任务") {
+            UnifiedScheduler.scheduleLongDelay(delay, "自定义唤醒任务") {
                 record(TAG, "? 自定义触发: $timeToken")
                 ApplicationHookEntry.onWakeupCustom(timeToken)
                 setWakenAtTimeAlarm()
@@ -937,6 +984,9 @@ class ApplicationHook {
                 filter.addAction(ApplicationHookConstants.BroadcastActions.RE_LOGIN)
                 filter.addAction(ApplicationHookConstants.BroadcastActions.RPC_TEST)
                 filter.addAction(ApplicationHookConstants.BroadcastActions.MANUAL_TASK)
+                filter.addAction(ApplicationHookConstants.BroadcastActions.HOOK_READY)
+                filter.addAction(ApplicationHookConstants.BroadcastActions.REFRESH_FRIENDS)
+                filter.addAction(ApplicationHookConstants.BroadcastActions.REFRESH_EXCHANGE_OPTIONS)
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     context.registerReceiver(mBroadcastReceiver, filter, Context.RECEIVER_EXPORTED)

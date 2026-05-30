@@ -20,6 +20,14 @@ object HookUtil {
 
     private var microContextCache: Any? = null
 
+    data class FriendRefreshResult(
+        val success: Boolean,
+        val userId: String = "",
+        val message: String = "",
+        val profiles: Int = 0,
+        val groups: Int = 0
+    )
+
     /**
      * Hook RpcBridgeExtension.rpc 方法，记录请求信息
      */
@@ -229,13 +237,16 @@ object HookUtil {
         Log.printStackTrace(TAG, it)
     }.getOrNull()
 
-    fun hookUser(classLoader: ClassLoader) {
-        runCatching {
+    fun hookUser(classLoader: ClassLoader): FriendRefreshResult {
+        var targetUserId = UserMap.currentUid.orEmpty()
+        return try {
             val selfId = getUserId(classLoader)
             if (selfId.isNullOrBlank()) {
-                Log.runtime(TAG, "hookUser 跳过：未获取到当前账号 userId")
-                return
+                val message = "hookUser 跳过：未获取到当前账号 userId"
+                Log.runtime(TAG, message)
+                return FriendRefreshResult(success = false, userId = targetUserId, message = message)
             }
+            targetUserId = selfId
             val sameAccount = UserMap.currentUid == selfId
             val previousUsers = if (sameAccount) {
                 UserMap.getUserMap().toMap()
@@ -253,14 +264,24 @@ object HookUtil {
                     UserMap.load(selfId)
                 }
                 val cachedCenter = FriendRepository.current(selfId)
-                if (cachedCenter.profiles.isEmpty() && UserMap.getUserMap().isNotEmpty()) {
+                val center = if (cachedCenter.profiles.isEmpty() && UserMap.getUserMap().isNotEmpty()) {
                     FriendRepository.mergeFromUserMap(selfId, allowPruneMissing = false)
+                } else {
+                    cachedCenter
                 }
-                Log.runtime(TAG, "好友缓存为空，跳过刷新并保留旧好友中心")
-                return
+                val message = "支付宝本地好友缓存为空，已保留旧好友中心"
+                Log.runtime(TAG, message)
+                return FriendRefreshResult(
+                    success = false,
+                    userId = selfId,
+                    message = message,
+                    profiles = center.profiles.size,
+                    groups = center.groups.size
+                )
             }
             UserMap.unload()
-            val friendClass = allFriends.firstOrNull()?.javaClass ?: return
+            val friendClass = allFriends.firstOrNull()?.javaClass
+                ?: return FriendRefreshResult(false, selfId, "支付宝本地好友缓存为空，已保留旧好友中心")
             val userIdField = findField(friendClass, "userId")
             val accountField = findField(friendClass, "account")
             val nameField = findField(friendClass, "name")
@@ -284,13 +305,39 @@ object HookUtil {
                     Log.printStackTrace(it)
                 }
             }
+            if (UserMap.getUserMap().isEmpty()) {
+                val center = FriendRepository.current(selfId)
+                val message = "支付宝本地好友缓存解析为空，已保留旧好友中心"
+                Log.runtime(TAG, message)
+                return FriendRefreshResult(
+                    success = false,
+                    userId = selfId,
+                    message = message,
+                    profiles = center.profiles.size,
+                    groups = center.groups.size
+                )
+            }
 
             selfEntity?.let { UserMap.saveSelf(it) }
-            UserMap.save(selfId)
-            FriendRepository.mergeFromUserMap(selfId, previousUsers, allowPruneMissing = true)
-            Log.runtime(TAG, "userCache load scuess !")
-        }.onFailure {
-            Log.printStackTrace(TAG, "hookUser 失败", it)
+            val userMapSaved = UserMap.save(selfId)
+            val center = FriendRepository.mergeFromUserMap(selfId, previousUsers, allowPruneMissing = true)
+            val message = if (userMapSaved) {
+                "好友刷新完成: profiles=${center.profiles.size}, groups=${center.groups.size}"
+            } else {
+                "好友刷新完成，但 friend.json 保存失败"
+            }
+            Log.runtime(TAG, "userCache load success ! $message")
+            FriendRefreshResult(
+                success = userMapSaved,
+                userId = selfId,
+                message = message,
+                profiles = center.profiles.size,
+                groups = center.groups.size
+            )
+        } catch (t: Throwable) {
+            val message = "hookUser 失败: ${t.message ?: t.javaClass.simpleName}"
+            Log.printStackTrace(TAG, "hookUser 失败", t)
+            FriendRefreshResult(success = false, userId = targetUserId, message = message)
         }
     }
 
